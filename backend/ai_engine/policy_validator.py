@@ -9,7 +9,8 @@ logger = logging.getLogger("policyiq.ai_engine.policy_validator")
 
 class PolicyValidator:
     def __init__(self):
-        self._gemini_model = os.getenv("GEMINI_PRO_MODEL", "gemini-1.5-pro")
+        self._gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+
 
     async def validate(self, policy_text: str) -> Dict[str, Any]:
         """
@@ -21,8 +22,8 @@ class PolicyValidator:
 Evaluate the feasibility of the following policy.
 Return a JSON object with exactly the following keys:
 - is_feasible: (boolean) whether the policy is fundamentally feasible to implement.
-- risk_score: (integer from 1 to 10) representing the risk of negative unintended consequences.
-- suggested_alternatives: (list of strings) up to 3 alternatives or improvements.
+- rejection_reason: (string) if not feasible, why? If feasible, a brief assessment of implementation risk.
+- refined_options: (list of strings) up to 3 alternatives or improvements.
 
 Policy Text:
 {policy_text}
@@ -32,13 +33,13 @@ Policy Text:
             "type": "OBJECT",
             "properties": {
                 "is_feasible": {"type": "BOOLEAN"},
-                "risk_score": {"type": "INTEGER"},
-                "suggested_alternatives": {
+                "rejection_reason": {"type": "STRING"},
+                "refined_options": {
                     "type": "ARRAY",
                     "items": {"type": "STRING"}
                 }
             },
-            "required": ["is_feasible", "risk_score", "suggested_alternatives"]
+            "required": ["is_feasible", "rejection_reason", "refined_options"]
         }
 
         try:
@@ -68,14 +69,14 @@ Policy Text:
             # Normalize to match the requested schema
             return {
                 "is_feasible": bool(payload.get("is_feasible", True)),
-                "risk_score": int(payload.get("risk_score", 5)),
-                "suggested_alternatives": list(payload.get("suggested_alternatives", []))[:3]
+                "rejection_reason": payload.get("rejection_reason") or f"Policy risk score is {payload.get('risk_score', 5)}/10",
+                "refined_options": list(payload.get("suggested_alternatives", payload.get("refined_options", [])))[:3]
             }
 
         except Exception as e:
             logger.exception(f"PolicyValidator failed: {e}")
             return {
                 "is_feasible": False,
-                "risk_score": 10,
-                "suggested_alternatives": ["Service unavailable. Please refine your policy and try again."]
+                "rejection_reason": "Policy validation service temporarily unavailable.",
+                "refined_options": ["Please try submitting your policy again later."]
             }

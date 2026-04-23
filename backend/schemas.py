@@ -28,8 +28,8 @@ class ValidatePolicyRequest(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ValidatePolicyResponse(BaseModel):
-    """Contract Pre-B: Gatekeeper verdict — valid or rejected with refinements."""
-    is_valid: bool = Field(..., description="True if the policy passes Gatekeeper checks.")
+    """Contract Pre-B: Gatekeeper verdict — feasible or rejected with refinements."""
+    is_feasible: bool = Field(..., description="True if the policy passes Gatekeeper checks.")
     rejection_reason: Optional[str] = Field(
         None,
         description="Human-readable explanation of why the policy was rejected.",

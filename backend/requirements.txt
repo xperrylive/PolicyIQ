@@ -7,3 +7,5 @@ google-cloud-aiplatform
 firebase-admin
 sse-starlette
 python-dotenv
+genkit
+genkit[google-genai]

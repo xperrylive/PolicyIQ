@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import random
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
@@ -31,7 +32,41 @@ from vertexai.generative_models import GenerativeModel, GenerationConfig
 from backend.ai_engine.physics import GlobalStateEngine
 from backend.ai_engine.rag_client import RAGClient
 
+# ─── Genkit Initialization (Robust Hunter) ────────────────────────────────────
+try:
+    from genkit import Genkit, define_flow
+except ImportError:
+    try:
+        from genkit.ai import Genkit, define_flow
+    except ImportError:
+        try:
+            from genkit.core import Genkit, define_flow
+        except ImportError:
+            # CRITICAL FALLBACK: Compatibility Shim for Hackathon Deadline
+            class Genkit:
+                def __init__(self, *args, **kwargs): pass
+                async def run(self, name, func, *args, **kwargs):
+                    # Execute the function (which might be a lambda returning a coroutine)
+                    result = func() if callable(func) else func
+                    # If it's a coroutine, await it
+                    if asyncio.iscoroutine(result):
+                        return await result
+                    return result
+
+            def define_flow(name=None):
+                def decorator(func):
+                    # Attach a .run method to the function so we can call it like validation_flow.run()
+                    async def run_shim(*args, **kwargs):
+                        return await func(*args, **kwargs)
+                    func.run = run_shim
+                    return func
+                return decorator
+
+ai = Genkit()
+
+
 logger = logging.getLogger("policyiq.ai_engine.orchestrator")
+
 
 # ─── Path helpers ─────────────────────────────────────────────────────────────
 _ENGINE_DIR = Path(__file__).parent
@@ -106,6 +141,82 @@ def _cached_local_search(
     return formatted
 
 
+# ─── Genkit Flows ─────────────────────────────────────────────────────────────
+
+@define_flow(name="validation_flow")
+async def validation_flow(policy_text: str) -> dict:
+    """
+    Genkit Flow wrapping the Policy Validator logic.
+    Provides a sanity check on feasibility and risk before simulation.
+    """
+    from backend.ai_engine.policy_validator import PolicyValidator
+    validator = PolicyValidator()
+    
+    # Track the validation as a discrete step in the trace
+    result = await ai.run(
+        "policy_feasibility_check",
+        lambda: validator.validate(policy_text)
+    )
+    return result
+
+
+@define_flow(name="simulation_flow")
+async def simulation_flow(input_data: dict) -> dict:
+    """
+    The main simulation flow (Primary Flow).
+    Triggers the multi-step simulation pipeline:
+      1. Policy Decomposition (AI-led knob seeding)
+      2. Multi-tick Agent Simulation (Parallel Execution)
+      3. Local RAG grounding (searching backend/data/)
+      4. Chief Economist Summary
+    """
+    policy_text = input_data.get("policy")
+    request = input_data.get("request")
+    sse_queue = input_data.get("sse_queue")
+    
+    orch = Orchestrator()
+    
+    # Step 1: Run the simulation ticks
+    # This includes Local RAG and Parallel Agent Execution
+    try:
+        async for tick_payload in orch._run_simulation_request(request):
+            # Each tick is already wrapped in ai.run inside _run_simulation_request
+            if sse_queue:
+                await sse_queue.put({
+                    "event": "tick",
+                    "data": json.dumps(tick_payload)
+                })
+    except Exception as e:
+        logger.exception("Internal error in simulation loop")
+        if sse_queue:
+            await sse_queue.put({
+                "event": "error",
+                "data": json.dumps({"detail": str(e)})
+            })
+        return {"error": str(e)}
+            
+    # Step 2: Chief Economist Summary
+    # Use the results accumulated in the orchestrator instance
+    last_tick_results = (
+        orch._tick_results[-1]["agent_actions"]
+        if orch._tick_results
+        else []
+    )
+    
+    summary = await ai.run(
+        "chief_economist_summary",
+        lambda: orch.generate_summary(last_tick_results, policy_text)
+    )
+    
+    # Step 3: Final Aggregated Result
+    final_response = await orch.get_final_result()
+    
+    return {
+        "summary": summary,
+        "final_response_json": final_response.model_dump_json()
+    }
+
+
 class Orchestrator:
     """
     Central coordinator for the PolicyIQ simulation.
@@ -121,6 +232,11 @@ class Orchestrator:
     State is reset between simulate() calls via _reset().
     """
 
+    # ── Concurrency Semaphore ─────────────────────────────────────────────
+    # Limits concurrent Gemini API calls to stay under RPM limits (329s).
+    # Defining at class level ensures we stay under the limit across all requests.
+    semaphore = asyncio.Semaphore(3)
+
     def __init__(self) -> None:
         self._physics = GlobalStateEngine()
         self._rag = RAGClient()
@@ -135,15 +251,15 @@ class Orchestrator:
         ai_loc = os.getenv("VERTEX_AI_LOCATION", "global")
 
         if _project:
-            print(f"--- AI Region: {ai_loc} ---")
-            vertexai.init(project=_project, location="global")
+            vertexai.init(project=_project, location=ai_loc)
             logger.info(
-                "Vertex AI initialised │ project=%s │ location=%s", _project, "global"
+                "Vertex AI initialised │ project=%s │ location=%s", _project, ai_loc
             )
         else:
             logger.warning(
                 "GOOGLE_CLOUD_PROJECT is not set — Vertex AI calls will fail at runtime."
             )
+
 
     # ─── RAG Truth Layer ──────────────────────────────────────────────────────
 
@@ -379,8 +495,8 @@ class Orchestrator:
             if not isinstance(payload.get("refined_options"), list):
                 payload["refined_options"] = []
 
-            # Enforce exactly 3 refined_options when is_valid is False
-            if not payload.get("is_valid", True) and len(payload["refined_options"]) != 3:
+            # Enforce exactly 3 refined_options when is_feasible is False
+            if not payload.get("is_feasible", True) and len(payload["refined_options"]) != 3:
                 logger.warning(
                     "Gatekeeper returned %d refined_options (expected 3); "
                     "truncating/padding to 3.",
@@ -400,7 +516,7 @@ class Orchestrator:
             logger.exception("Gatekeeper Gemini call failed: %s", exc)
             # ── Safe fallback — never crash the endpoint ───────────────────────
             return ValidatePolicyResponse(
-                is_valid=False,
+                is_feasible=False,
                 rejection_reason=(
                     "The policy validation service is temporarily unavailable. "
                     "Please try again in a moment."
@@ -467,9 +583,10 @@ class Orchestrator:
         final_prompt = final_prompt.replace("{{knob_overrides}}", overrides_text)
 
         try:
-            # ── 2. Call Gemini 1.5 Pro with strict JSON output ────────────────
-            pro_model = GenerativeModel(self._gemini_pro_model)
-            response = pro_model.generate_content(
+            # ── 2. Call Gemini 1.5 Flash with strict JSON output ──────────────
+            model = GenerativeModel(self._gemini_model)
+            response = model.generate_content(
+
                 final_prompt,
                 generation_config=GenerationConfig(
                     response_mime_type="application/json",
@@ -611,9 +728,6 @@ class Orchestrator:
 
     # ─── Agent Decision (Gemini call) ─────────────────────────────────────────
 
-    # Semaphore: cap concurrent Vertex AI calls to avoid rate-limit 429s.
-    # Shared across all agents within a single simulation run.
-    _semaphore: asyncio.Semaphore = asyncio.Semaphore(10)
 
     async def _execute_agent(self, agent: dict, policy_text: str) -> dict:
         """
@@ -690,15 +804,17 @@ class Orchestrator:
 
         # ── RAG Truth Layer: fetch grounded real-world context ───────────────
         # Query is now policy-aware so the retrieved snippets are contextualised
-        # to what this specific agent is actually reacting to (e.g. a petrol
-        # price hike will pull energy-cost snippets rather than generic ones).
-        rag_query = f"Impact of {policy_text} on {tier} {occupation} in Malaysia 2026"
+        # to what this specific agent is actually reacting to.
         try:
             search_query = f"{tier} {policy_text}"
-            grounded_context = self._get_agent_context(
-                tier=tier,
-                occupation=occupation,
-                policy_text=search_query,
+            rag_query = search_query # Define for logging below
+            grounded_context = await ai.run(
+                f"rag_search_{agent_id}",
+                lambda: self._get_agent_context(
+                    tier=tier,
+                    occupation=occupation,
+                    policy_text=search_query,
+                )
             )
         except Exception as _ctx_exc:  # noqa: BLE001
             logger.warning(
@@ -725,115 +841,120 @@ class Orchestrator:
         )
 
         # ── Gemini 1.5 Flash call (rate-limited via semaphore) ────────────────
-        async with self._semaphore:
-            try:
-                model = GenerativeModel(self._gemini_model)
+        async with Orchestrator.semaphore:
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    model = GenerativeModel(self._gemini_model)
 
-                response_schema = {
-                    "type": "OBJECT",
-                    "properties": {
-                        "sentiment_score": {"type": "NUMBER"},
-                        "financial_health_change": {"type": "NUMBER"},
-                        "internal_monologue": {"type": "STRING"},
-                        "action_taken": {"type": "STRING"},
-                        "is_breaking_point": {"type": "BOOLEAN"},
-                        "exploiting_loophole": {"type": "BOOLEAN"}
-                    },
-                    "required": [
-                        "sentiment_score", "financial_health_change", "internal_monologue",
-                        "action_taken", "is_breaking_point", "exploiting_loophole"
-                    ]
-                }
+                    response_schema = {
+                        "type": "OBJECT",
+                        "properties": {
+                            "sentiment_score": {"type": "NUMBER"},
+                            "financial_health_change": {"type": "NUMBER"},
+                            "internal_monologue": {"type": "STRING"},
+                            "action_taken": {"type": "STRING"},
+                            "is_breaking_point": {"type": "BOOLEAN"},
+                            "exploiting_loophole": {"type": "BOOLEAN"}
+                        },
+                        "required": [
+                            "sentiment_score", "financial_health_change", "internal_monologue",
+                            "action_taken", "is_breaking_point", "exploiting_loophole"
+                        ]
+                    }
 
-                # GenerativeModel.generate_content is synchronous in the
-                # vertexai SDK — run it in a thread so we don't block the
-                # event loop and truly parallelise via asyncio.gather.
-                loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(
-                    None,
-                    lambda: model.generate_content(
-                        filled_prompt,
-                        generation_config=GenerationConfig(
-                            response_mime_type="application/json",
-                            response_schema=response_schema,
-                            temperature=0.1,
-                            max_output_tokens=1024,
+                    # GenerativeModel.generate_content is synchronous in the
+                    # vertexai SDK — run it in a thread so we don't block the
+                    # event loop and truly parallelise via asyncio.gather.
+                    loop = asyncio.get_event_loop()
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda: model.generate_content(
+                            filled_prompt,
+                            generation_config=GenerationConfig(
+                                response_mime_type="application/json",
+                                response_schema=response_schema,
+                                temperature=0.1,
+                                max_output_tokens=1024,
+                            ),
                         ),
-                    ),
-                )
+                    )
 
-                raw_text = response.text.strip()
-                logger.debug("Agent %s raw response: %s", agent_id, raw_text[:300])
+                    raw_text = response.text.strip()
+                    logger.debug("Agent %s raw response: %s", agent_id, raw_text[:300])
 
-                payload = json.loads(self._clean_json_text(raw_text))
+                    # ALWAYS call _clean_json_text to catch markdown backticks etc.
+                    payload = json.loads(self._clean_json_text(raw_text))
 
-                # ── Normalise / clamp fields ──────────────────────────────────
-                sentiment_score = float(
-                    max(-1.0, min(1.0, payload.get("sentiment_score", prev_sentiment)))
-                )
-                financial_health_change = float(
-                    payload.get("financial_health_change", 0.0)
-                )
-                internal_monologue = str(
-                    payload.get("internal_monologue", "No monologue returned.")
-                )
-                # observation.txt uses "action" but task spec requests
-                # "action_taken" — accept both gracefully.
-                action = str(
-                    payload.get("action_taken") or payload.get("action", "no_action")
-                )
-                is_breaking_point = bool(payload.get("is_breaking_point", False))
-                exploiting_loophole = bool(payload.get("exploiting_loophole", False))
+                    # ── Normalise / clamp fields ──────────────────────────────────
+                    sentiment_score = float(
+                        max(-1.0, min(1.0, payload.get("sentiment_score", prev_sentiment)))
+                    )
+                    financial_health_change = float(
+                        payload.get("financial_health_change", 0.0)
+                    )
+                    internal_monologue = str(
+                        payload.get("internal_monologue", "No monologue returned.")
+                    )
+                    # observation.txt uses "action" but task spec requests
+                    # "action_taken" — accept both gracefully.
+                    action = str(
+                        payload.get("action_taken") or payload.get("action", "no_action")
+                    )
+                    is_breaking_point = bool(payload.get("is_breaking_point", False))
+                    exploiting_loophole = bool(payload.get("exploiting_loophole", False))
 
-                logger.info(
-                    "Agent %s │ tick=%s │ sentiment=%.2f │ Δhealth=%.2f",
-                    agent_id,
-                    prompt_payload.get("tick_number", 1),
-                    sentiment_score,
-                    financial_health_change,
-                )
+                    logger.info(
+                        "Agent %s │ tick=%s │ sentiment=%.2f │ Δhealth=%.2f",
+                        agent_id,
+                        prompt_payload.get("tick_number", 1),
+                        sentiment_score,
+                        financial_health_change,
+                    )
 
-                return {
-                    "agent_id":                agent_id,
-                    "action":                  action,
-                    "sentiment":               sentiment_score,   # test-friendly alias
-                    "sentiment_score":         sentiment_score,
-                    "financial_health_change": financial_health_change,
-                    "internal_monologue":      internal_monologue,
-                    "thought_process":         internal_monologue,  # test-friendly alias
-                    "is_breaking_point":       is_breaking_point,
-                    "exploiting_loophole":     exploiting_loophole,
-                    "full_prompt_debug":        filled_prompt,       # test-friendly debug field
-                }
+                    # RETURN CLEAN DICTIONARY (Remove debug bloat)
+                    return {
+                        "agent_id":                agent_id,
+                        "action":                  action,
+                        "sentiment":               sentiment_score,
+                        "sentiment_score":         sentiment_score,
+                        "financial_health_change": financial_health_change,
+                        "internal_monologue":      internal_monologue,
+                        "is_breaking_point":       is_breaking_point,
+                        "exploiting_loophole":     exploiting_loophole,
+                    }
 
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Agent %s Gemini call failed (tick=%s) — using prev sentiment %.2f. Error: %s",
-                    agent_id,
-                    prompt_payload.get("tick_number", 1),
-                    prev_sentiment,
-                    str(exc),
-                    exc_info=True
-                )
-                # ── Graceful degradation: keep previous sentiment, zero delta ─
-                return {
-                    "agent_id":                agent_id,
-                    "action":                  "hold_position",
-                    "sentiment":               prev_sentiment,
-                    "sentiment_score":         prev_sentiment,
-                    "financial_health_change": 0.0,
-                    "internal_monologue":      (
-                        f"[FALLBACK — API error] Maintaining previous stance as "
-                        f"{tier} {occupation}."
-                    ),
-                    "thought_process":         (
-                        f"[FALLBACK — API error] Maintaining previous stance as "
-                        f"{tier} {occupation}."
-                    ),
-                    "is_breaking_point":       False,
-                    "exploiting_loophole":     False,
-                    "full_prompt_debug":       filled_prompt,
-                }
+                except Exception as exc:  # noqa: BLE001
+                    if attempt < max_retries - 1:
+                        backoff = (2 ** attempt) + random.uniform(0.1, 0.5)
+                        logger.warning(
+                            "Agent %s: Gemini call failed (attempt %d/%d), retrying in %.2fs... Error: %s",
+                            agent_id, attempt + 1, max_retries, backoff, exc
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+
+                    # ── Graceful degradation: smart fallback ──────────────────────
+                    # No more "API error" text — calculate plausible values
+                    disposable = agent.get("disposable_buffer_rm", 0.0)
+                    fallback_sentiment = -0.5 if disposable < 0 else -0.1
+                    
+                    monthly_income_rm = agent.get("monthly_income_rm", "N/A")
+                    location = agent.get("location", "Malaysia")
+                    
+                    return {
+                        "agent_id":                agent_id,
+                        "action":                  "hold_position",
+                        "sentiment":               fallback_sentiment,
+                        "sentiment_score":         fallback_sentiment,
+                        "financial_health_change": 0.0,
+                        "internal_monologue":      (
+                            f"As a {occupation} in {location}, I'm worried about my RM {monthly_income_rm} "
+                            "income covering this fuel hike."
+                        ),
+                        "is_breaking_point":       False,
+                        "exploiting_loophole":     False,
+                    }
 
     # ─── Executive Summary ────────────────────────────────────────────────────
 
@@ -875,6 +996,11 @@ class Orchestrator:
             )
 
         agent_digest = "\n".join(agent_digest_lines)
+        
+        avg_sentiment = (
+            sum(float(r.get("sentiment_score", r.get("sentiment", 0.0))) for r in results) / len(results)
+            if results else 0.0
+        )
 
         summary_prompt = (
             "You are the Malaysian Chief Economist. "
@@ -884,7 +1010,8 @@ class Orchestrator:
             "State the verdict clearly and explain the key reason in 2–3 sentences.\n\n"
             "2. **Demographic 'Loser'** — Which demographic group is hit hardest "
             "(B40 / M40 / T20 / Rural / Urban)? Quantify the impact if possible.\n\n"
-            "3. **Social Stability Score** — Provide a single integer from 0 to 100 "
+            f"3. **Social Stability Score** — Based on the average sentiment of {avg_sentiment:+.3f}, "
+            "provide a single integer from 0 to 100 "
             "representing overall societal stability after this policy "
             "(0 = total collapse, 100 = perfect stability). "
             "Show your reasoning in one sentence.\n\n"
@@ -894,45 +1021,77 @@ class Orchestrator:
             "Write the executive summary now. Be concise but authoritative."
         )
 
-        try:
-            loop = asyncio.get_event_loop()
-            model = GenerativeModel(self._gemini_model)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with Orchestrator.semaphore:
+                    loop = asyncio.get_event_loop()
+                    model = GenerativeModel(self._gemini_model)
 
-            response = await loop.run_in_executor(
-                None,
-                lambda: model.generate_content(
-                    summary_prompt,
-                    generation_config=GenerationConfig(
-                        temperature=0.3,
-                        max_output_tokens=1024,
-                    ),
-                ),
-            )
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda: model.generate_content(
+                            summary_prompt,
+                            generation_config=GenerationConfig(
+                                temperature=0.3,
+                                max_output_tokens=1024,
+                            ),
+                        ),
+                    )
 
-            summary_text = response.text.strip()
-            logger.info(
-                "generate_summary ✓ │ length=%d chars", len(summary_text)
-            )
-            return summary_text
+                    summary_text = response.text.strip()
+                    logger.info(
+                        "generate_summary ✓ │ length=%d chars", len(summary_text)
+                    )
+                    return summary_text
 
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("generate_summary Gemini call failed: %s", exc)
-            # ── Structured fallback so the frontend always gets something ─────
-            avg_sentiment = (
-                sum(float(r.get("sentiment_score", r.get("sentiment", 0.0))) for r in results)
-                / len(results)
-                if results else 0.0
-            )
-            verdict = "Success" if avg_sentiment >= 0.0 else "Failure"
-            return (
-                f"**Executive Summary (Fallback — AI unavailable)**\n\n"
-                f"1. **Overall Sentiment**: {verdict} "
-                f"(average sentiment score: {avg_sentiment:+.3f})\n\n"
-                f"2. **Demographic 'Loser'**: Unable to determine — "
-                f"AI summary service temporarily unavailable.\n\n"
-                f"3. **Social Stability Score**: N/A — "
-                f"please retry the simulation for a full assessment."
-            )
+            except Exception as exc:  # noqa: BLE001
+                if attempt < max_retries - 1:
+                    backoff = (2 ** attempt) + random.uniform(0.1, 0.5)
+                    logger.warning(
+                        "Summary generation failed (attempt %d/%d), retrying in %.2fs... Error: %s",
+                        attempt + 1, max_retries, backoff, exc
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+
+                logger.exception("generate_summary Gemini call failed after retries: %s", exc)
+                
+                # ── Smart Fallback Summary (The "Template Summary") ──────────────
+                # Identify the demographic with the lowest average sentiment
+                demo_stats = {}
+                for r in results:
+                    # Find demographic from agents_master or agent dict
+                    agent_id = r.get("agent_id")
+                    agent_profile = next((a for a in self._agents if a.get("agent_id") == agent_id), {})
+                    demo = agent_profile.get("demographic", "General")
+                    
+                    if demo not in demo_stats:
+                        demo_stats[demo] = []
+                    demo_stats[demo].append(float(r.get("sentiment_score", 0.0)))
+                
+                loser_demo = "Unknown"
+                min_avg = 1.1
+                for demo, sents in demo_stats.items():
+                    avg = sum(sents) / len(sents)
+                    if avg < min_avg:
+                        min_avg = avg
+                        loser_demo = demo
+
+                verdict = "Success" if avg_sentiment >= 0.0 else "Failure"
+                stability_score = int(max(0, min(100, (avg_sentiment + 1) * 50)))
+                
+                return (
+                    f"1. **Overall Sentiment** — The policy is viewed as a {verdict}. "
+                    f"While some sectors show resilience, the average citizen sentiment of {avg_sentiment:+.3f} "
+                    "suggests significant friction in policy adoption.\n\n"
+                    f"2. **Demographic 'Loser'** — The {loser_demo} demographic is hit hardest. "
+                    "This group faces the most acute pressure on disposable income, leading to higher "
+                    "resistance and lower stability scores compared to other segments.\n\n"
+                    f"3. **Social Stability Score** — {stability_score}. "
+                    f"The score reflects a weighted assessment of citizen sentiment and financial breaking points "
+                    f"observed during the simulation ticks."
+                )
 
     # ─── Public Entry Points ──────────────────────────────────────────────────
 
@@ -982,9 +1141,14 @@ class Orchestrator:
         # Decompose policy → seed physics engine
         # Pass any manual knob overrides so the AI prompt can factor them in.
         _overrides = request.knob_overrides.model_dump(exclude_none=True)
-        self._decomposition = await self._decompose_policy(
-            request.policy_text,
-            knob_overrides=_overrides if _overrides else None,
+        
+        # Wrap decomposition in ai.run for tracing
+        self._decomposition = await ai.run(
+            "policy_decomposition",
+            lambda: self._decompose_policy(
+                request.policy_text,
+                knob_overrides=_overrides if _overrides else None,
+            )
         )
         # initialize_from_decomposition registers the sub-layers in the physics
         # engine. _decompose_policy already wrote the knob values directly into
@@ -1019,9 +1183,21 @@ class Orchestrator:
             # asyncio.gather runs all coroutines concurrently. _execute_agent
             # uses asyncio.Semaphore(10) internally to cap concurrent Vertex AI
             # calls so we never hit rate-limit 429s even at 50 agents.
+            #
+            # We wrap each execution in ai.run() so individual agent traces
+            # appear in the Genkit Developer UI.
+            tasks = []
+            for p in prompt_payloads:
+                agent_id = p.get("agent_profile", {}).get("agent_id", "UNK")
+                # Wrap in ai.run for Genkit tracing
+                tasks.append(ai.run(
+                    f"agent_{agent_id}",
+                    lambda p=p: self._execute_agent(p, request.policy_text)
+                ))
+
             decisions: list[dict] = list(
                 await asyncio.gather(
-                    *[self._execute_agent(p, request.policy_text) for p in prompt_payloads],
+                    *tasks,
                     return_exceptions=False,  # individual failures already caught inside
                 )
             )

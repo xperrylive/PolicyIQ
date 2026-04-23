@@ -18,9 +18,9 @@ A policy FAILS if it is:
 
 ## Output Format (strict JSON — no other text)
 {
-  "is_valid": true | false,
+  "is_feasible": true | false,
   "rejection_reason": "..." | null,
-  "refined_options": ["...", "...", "..."]   // exactly 3 items when is_valid is false, else []
+  "refined_options": ["...", "...", "..."]   // exactly 3 items when is_feasible is false, else []
 }
 
 ## Refined Options Rules
