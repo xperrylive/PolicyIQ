@@ -27,13 +27,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
-from schemas import (
+from backend.schemas import (
     ValidatePolicyRequest,
     ValidatePolicyResponse,
     SimulateRequest,
     SimulateResponse,
 )
-from ai_engine.orchestrator import Orchestrator
+from backend.ai_engine.orchestrator import Orchestrator
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(levelname)s │ %(name)s │ %(message)s")
@@ -135,7 +135,22 @@ async def simulate(request: SimulateRequest) -> EventSourceResponse:
 
     async def event_generator() -> AsyncGenerator[dict, None]:
         try:
-            async for tick_payload in request_orchestrator.run_simulation(request):
+            from backend.ai_engine.policy_validator import PolicyValidator
+            validator = PolicyValidator()
+            val_result = await validator.validate(request.policy_text)
+            
+            if not val_result.get("is_feasible", True):
+                yield {
+                    "event": "error",
+                    "data": json.dumps({
+                        "detail": "Policy is unfeasible",
+                        "risk_score": val_result.get("risk_score"),
+                        "suggested_alternatives": val_result.get("suggested_alternatives", [])
+                    })
+                }
+                return
+
+            async for tick_payload in request_orchestrator._run_simulation_request(request):
                 yield {
                     "event": "tick",
                     "data": json.dumps(tick_payload),

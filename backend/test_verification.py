@@ -10,7 +10,7 @@ Economic Entity records (monthly_income_rm, digital_readiness_score, etc.)
 for each B40 / M40 / T20 agent.
 """
 
-from ai_engine.orchestrator import Orchestrator
+from backend.ai_engine.orchestrator import Orchestrator
 
 # ── Generate 5 synthetic Economic Entity agents ────────────────────────────────
 agents = Orchestrator._synthetic_agents(count=5)

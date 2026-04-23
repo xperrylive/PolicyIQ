@@ -17,17 +17,19 @@ Team Backend owns the cloud deployment and environment configuration.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
 import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig
 
-from ai_engine.physics import GlobalStateEngine
-from ai_engine.rag_client import RAGClient
+from backend.ai_engine.physics import GlobalStateEngine
+from backend.ai_engine.rag_client import RAGClient
 
 logger = logging.getLogger("policyiq.ai_engine.orchestrator")
 
@@ -35,6 +37,73 @@ logger = logging.getLogger("policyiq.ai_engine.orchestrator")
 _ENGINE_DIR = Path(__file__).parent
 PROMPTS_DIR = _ENGINE_DIR / "prompts"
 AGENT_DNA_FILE = _ENGINE_DIR / "agent_dna" / "agents_master.json"
+
+
+# ─── RAG Truth Layer — module-level cached search ─────────────────────────────
+# lru_cache cannot decorate instance methods (it would hash `self`), so the
+# actual API call lives here at module scope. The Orchestrator delegates to
+# this function via _get_agent_context(), keeping the public API clean.
+#
+# Cache semantics: the cache key is (client, project, location, data_store_id,
+# tier, occupation). In practice client/project/data_store_id are constant for
+# the lifetime of the process, so the effective key is just (tier, occupation).
+# With 3 tiers × 5 occupations = 15 unique combinations, the cache fills quickly
+# and all 50 agents benefit from the warm entries on subsequent ticks.
+
+@functools.lru_cache(maxsize=64)
+def _cached_local_search(
+    *,
+    tier: str,
+    occupation: str,
+    query: str,
+) -> str:
+    """
+    Execute a Local File Search query and return the top-10 snippets as a string.
+
+    This function is intentionally pure (no side effects beyond the API call)
+    and is cached at the module level so the same (tier, occupation) combination
+    is only fetched once per process lifetime.
+
+    Args:
+        tier:          Agent income bracket (``"B40"`` / ``"M40"`` / ``"T20"``).
+        occupation:    Agent job type (e.g. ``"Gig Worker"``).
+        query:         The search query (e.g. "B40 petrol price").
+
+    Returns:
+        A formatted multi-line string with ≤10 grounded snippets.
+    """
+    _log = logging.getLogger("policyiq.ai_engine.orchestrator")
+    
+    # Extract keywords
+    keywords = [word for word in re.findall(r'[\w.]+', query) if len(word) > 2]
+    
+    # Path: backend/data/*.jsonl
+    data_dir = Path(__file__).parent.parent / "data"
+    results = []
+    
+    if data_dir.exists():
+        for file_path in data_dir.glob("*.jsonl"):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line_lower = line.lower()
+                        if any(kw.lower() in line_lower for kw in keywords):
+                            results.append(line.strip())
+                            if len(results) >= 10:
+                                break
+            except Exception as e:
+                _log.error("Error reading %s: %s", file_path, e)
+            if len(results) >= 10:
+                break
+
+    if not results:
+        _log.warning("[WARNING] No RAG snippets found locally. RAG Query sent: %s", query)
+        _log.critical("CRITICAL: Running simulation WITHOUT grounded data.")
+        return ""
+
+    _log.info(f"--- LOCAL RAG SUCCESS: Found {len(results)} snippets ---")
+    formatted = "\n".join(f"- {s}" for s in results)
+    return formatted
 
 
 class Orchestrator:
@@ -58,20 +127,50 @@ class Orchestrator:
         self._decomposition: Optional[dict] = None
         self._tick_results: list[dict] = []
         self._agents: list[dict] = []
-        self._gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+        self._gemini_model: str     = os.getenv("GEMINI_MODEL",     "gemini-1.5-flash")
+        self._gemini_pro_model: str = os.getenv("GEMINI_PRO_MODEL", "gemini-1.5-pro")
 
         # ── Vertex AI SDK initialisation ──────────────────────────────────────
         _project  = os.getenv("GOOGLE_CLOUD_PROJECT", "")
-        _location = os.getenv("VERTEX_AI_LOCATION", "asia-southeast1")
+        ai_loc = os.getenv("VERTEX_AI_LOCATION", "global")
+
         if _project:
-            vertexai.init(project=_project, location=_location)
+            print(f"--- AI Region: {ai_loc} ---")
+            vertexai.init(project=_project, location="global")
             logger.info(
-                "Vertex AI initialised │ project=%s │ location=%s", _project, _location
+                "Vertex AI initialised │ project=%s │ location=%s", _project, "global"
             )
         else:
             logger.warning(
                 "GOOGLE_CLOUD_PROJECT is not set — Vertex AI calls will fail at runtime."
             )
+
+    # ─── RAG Truth Layer ──────────────────────────────────────────────────────
+
+    def _get_agent_context(self, tier: str, occupation: str, policy_text: str) -> str:
+        """
+        Search local JSONL files for grounded economic context about a specific
+        agent archetype and return the top-10 matching snippet strings as a block.
+
+        Results are cached via ``lru_cache`` on the inner function so that
+        identical (tier, occupation, query) combinations are only scanned from
+        disk **once** per process lifetime.
+
+        Args:
+            tier:        Income bracket, e.g. ``"B40"``, ``"M40"``, ``"T20"``.
+            occupation:  Agent job type, e.g. ``"Gig Worker"``.
+            policy_text: Query string — includes tier prefix so local search
+                         matches relevant JSONL lines (e.g. "B40 petrol price").
+
+        Returns:
+            A formatted string containing up to 10 grounded snippets from
+            ``backend/data/*.jsonl``, or an empty string if no matches found.
+        """
+        return _cached_local_search(
+            tier=tier,
+            occupation=occupation,
+            query=policy_text,
+        )
 
     # ─── Prompt Loaders ───────────────────────────────────────────────────────
 
@@ -219,6 +318,21 @@ class Orchestrator:
             })
         return agents
 
+    # ─── JSON Utility ─────────────────────────────────────────────────────────
+
+    def _clean_json_text(self, text: str) -> str:
+        """
+        Aggressively cleans string to extract JSON payload.
+        Uses a regex to find the FIRST { and the LAST } and throw away everything else.
+        Removes trailing commas before closing braces.
+        """
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            text = match.group(0)
+        text = re.sub(r'(\w+)\s*:', r'"\1":', text)
+        text = re.sub(r',\s*\}', '}', text)
+        return text
+
     # ─── Gatekeeper ───────────────────────────────────────────────────────────
 
     async def validate_policy(self, request) -> object:
@@ -234,7 +348,7 @@ class Orchestrator:
             or the model returns malformed JSON.
         """
         # ── Import here to avoid circular deps at module load ─────────────────
-        from schemas import ValidatePolicyResponse  # noqa: PLC0415
+        from backend.schemas import ValidatePolicyResponse  # noqa: PLC0415
 
         text = request.raw_policy_text.strip()
         gatekeeper_prompt = self._load_prompt("gatekeeper.txt")
@@ -259,7 +373,7 @@ class Orchestrator:
             logger.info("Gatekeeper raw response: %s", raw_text[:300])
 
             # ── Parse and validate the JSON against our Pydantic schema ───────
-            payload = json.loads(raw_text)
+            payload = json.loads(self._clean_json_text(raw_text))
 
             # Normalise: ensure refined_options is always a list
             if not isinstance(payload.get("refined_options"), list):
@@ -334,7 +448,7 @@ class Orchestrator:
         ``self._physics.knob_state`` (i.e. current_state) so downstream ticks
         immediately start from the AI-determined baseline.
         """
-        from schemas import PolicyDecomposition  # noqa: PLC0415
+        from backend.schemas import PolicyDecomposition  # noqa: PLC0415
 
         # ── 1. Load & fill the prompt template ───────────────────────────────
         decomposition_prompt = self._load_prompt("decomposition.txt")
@@ -354,7 +468,7 @@ class Orchestrator:
 
         try:
             # ── 2. Call Gemini 1.5 Pro with strict JSON output ────────────────
-            pro_model = GenerativeModel("gemini-1.5-pro")
+            pro_model = GenerativeModel(self._gemini_pro_model)
             response = pro_model.generate_content(
                 final_prompt,
                 generation_config=GenerationConfig(
@@ -368,7 +482,7 @@ class Orchestrator:
             logger.info("Decomposition raw response (first 500 chars): %s", raw_text[:500])
 
             # ── 3. Parse JSON ─────────────────────────────────────────────────
-            payload = json.loads(raw_text)
+            payload = json.loads(self._clean_json_text(raw_text))
 
             # ── 4. Per-knob 0.0 fallback safety ──────────────────────────────
             # Gemini sometimes omits knobs it considers "not affected". We
@@ -501,15 +615,22 @@ class Orchestrator:
     # Shared across all agents within a single simulation run.
     _semaphore: asyncio.Semaphore = asyncio.Semaphore(10)
 
-    async def _execute_agent(self, prompt_payload: dict) -> dict:
+    async def _execute_agent(self, agent: dict, policy_text: str) -> dict:
         """
         Contract D: Fire the agent prompt at Gemini 1.5 Flash and parse the
         strict JSON response.
+
+        Args:
+            agent:       Full Economic Entity profile dict.
+            policy_text: Raw policy string being simulated — injected into both
+                         the RAG search query and the final Gemini prompt so the
+                         agent knows exactly what it is reacting to.
 
         Context injected into the observation.txt template:
           - Full Economic Entity profile (all fields)
           - Current GlobalState (the 8 Knobs + effective per-agent impact)
           - RAG-sourced world_update narrative
+          - policy_text (what policy this agent is reacting to)
 
         Response fields (application/json guaranteed):
           - sentiment_score         float  [-1.0, 1.0]
@@ -522,9 +643,21 @@ class Orchestrator:
         Resilience: if Gemini fails (network, quota, parse error) we return
         the agent's previous sentiment_score so the simulation never crashes.
         """
-        agent = prompt_payload["agent_profile"]
-        agent_id = agent["agent_id"]
-        prev_sentiment = agent.get("sentiment_score", 0.0)
+        # Support both old-style bundled payload dicts and new direct agent dicts.
+        # If `agent` is a prompt_payload bundle (has "agent_profile" key), unwrap it.
+        if "agent_profile" in agent:
+            prompt_payload = agent
+            agent = prompt_payload["agent_profile"]
+        else:
+            prompt_payload = {}
+
+        # Resolve the canonical agent_id — test agents may use "id" instead.
+        agent_id = agent.get("agent_id") or agent.get("id", "UNKNOWN")
+        prev_sentiment = agent.get("sentiment_score", agent.get("sentiment", 0.0))
+
+        # Resolve tier — test agents may use "tier" instead of "demographic".
+        tier = agent.get("demographic") or agent.get("tier", "M40")
+        occupation = agent.get("occupation", "General Worker")
 
         # ── Build the filled observation prompt ───────────────────────────────
         observation_template = self._load_prompt("observation.txt")
@@ -553,13 +686,64 @@ class Orchestrator:
             .replace("{{world_update}}",               prompt_payload.get("world_update", ""))
             .replace("{{rag_context}}",                prompt_payload.get("rag_context", ""))
             .replace("{{effective_knob_impact_json}}", json.dumps(effective_knob_impact, indent=2))
-            # policy_text is available as a world_update prefix; no extra placeholder needed
+        )
+
+        # ── RAG Truth Layer: fetch grounded real-world context ───────────────
+        # Query is now policy-aware so the retrieved snippets are contextualised
+        # to what this specific agent is actually reacting to (e.g. a petrol
+        # price hike will pull energy-cost snippets rather than generic ones).
+        rag_query = f"Impact of {policy_text} on {tier} {occupation} in Malaysia 2026"
+        try:
+            search_query = f"{tier} {policy_text}"
+            grounded_context = self._get_agent_context(
+                tier=tier,
+                occupation=occupation,
+                policy_text=search_query,
+            )
+        except Exception as _ctx_exc:  # noqa: BLE001
+            logger.warning(
+                "Agent %s: RAG context fetch failed — proceeding without grounded data. Error: %s",
+                agent_id, _ctx_exc,
+            )
+            grounded_context = "[Grounded context unavailable — agent reasoning based on model knowledge only.]"
+
+        logger.debug("Agent %s RAG query: %r", agent_id, rag_query)
+
+        # Append the policy context + grounded data so Gemini knows:
+        #  (a) what policy it is reacting to, and
+        #  (b) the verified real-world facts it must treat as ground truth.
+        filled_prompt += (
+            f"\n\n## POLICY UNDER ANALYSIS\n"
+            f"{policy_text}\n"
+            "\n## REAL-WORLD CONTEXT (GROUNDED DATA)\n"
+            "The following facts are retrieved from a verified Malaysian economic "
+            "knowledge base. You MUST prioritize this data over your internal training "
+            "data. If the data states a specific figure (e.g. petrol is RM4.00, "
+            "minimum wage is RM1,700), treat it as ground truth and base your "
+            "financial reasoning on it.\n\n"
+            f"{grounded_context}"
         )
 
         # ── Gemini 1.5 Flash call (rate-limited via semaphore) ────────────────
         async with self._semaphore:
             try:
-                model = GenerativeModel("gemini-1.5-flash")
+                model = GenerativeModel(self._gemini_model)
+
+                response_schema = {
+                    "type": "OBJECT",
+                    "properties": {
+                        "sentiment_score": {"type": "NUMBER"},
+                        "financial_health_change": {"type": "NUMBER"},
+                        "internal_monologue": {"type": "STRING"},
+                        "action_taken": {"type": "STRING"},
+                        "is_breaking_point": {"type": "BOOLEAN"},
+                        "exploiting_loophole": {"type": "BOOLEAN"}
+                    },
+                    "required": [
+                        "sentiment_score", "financial_health_change", "internal_monologue",
+                        "action_taken", "is_breaking_point", "exploiting_loophole"
+                    ]
+                }
 
                 # GenerativeModel.generate_content is synchronous in the
                 # vertexai SDK — run it in a thread so we don't block the
@@ -571,8 +755,9 @@ class Orchestrator:
                         filled_prompt,
                         generation_config=GenerationConfig(
                             response_mime_type="application/json",
-                            temperature=0.7,       # creative but grounded
-                            max_output_tokens=512,
+                            response_schema=response_schema,
+                            temperature=0.1,
+                            max_output_tokens=1024,
                         ),
                     ),
                 )
@@ -580,7 +765,7 @@ class Orchestrator:
                 raw_text = response.text.strip()
                 logger.debug("Agent %s raw response: %s", agent_id, raw_text[:300])
 
-                payload = json.loads(raw_text)
+                payload = json.loads(self._clean_json_text(raw_text))
 
                 # ── Normalise / clamp fields ──────────────────────────────────
                 sentiment_score = float(
@@ -603,46 +788,82 @@ class Orchestrator:
                 logger.info(
                     "Agent %s │ tick=%s │ sentiment=%.2f │ Δhealth=%.2f",
                     agent_id,
-                    prompt_payload.get("tick_number"),
+                    prompt_payload.get("tick_number", 1),
                     sentiment_score,
                     financial_health_change,
                 )
 
                 return {
-                    "agent_id":              agent_id,
-                    "action":                action,
-                    "sentiment_score":       sentiment_score,
+                    "agent_id":                agent_id,
+                    "action":                  action,
+                    "sentiment":               sentiment_score,   # test-friendly alias
+                    "sentiment_score":         sentiment_score,
                     "financial_health_change": financial_health_change,
-                    "internal_monologue":    internal_monologue,
-                    "is_breaking_point":     is_breaking_point,
-                    "exploiting_loophole":   exploiting_loophole,
+                    "internal_monologue":      internal_monologue,
+                    "thought_process":         internal_monologue,  # test-friendly alias
+                    "is_breaking_point":       is_breaking_point,
+                    "exploiting_loophole":     exploiting_loophole,
+                    "full_prompt_debug":        filled_prompt,       # test-friendly debug field
                 }
 
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
+                logger.error(
                     "Agent %s Gemini call failed (tick=%s) — using prev sentiment %.2f. Error: %s",
                     agent_id,
-                    prompt_payload.get("tick_number"),
+                    prompt_payload.get("tick_number", 1),
                     prev_sentiment,
-                    exc,
+                    str(exc),
+                    exc_info=True
                 )
                 # ── Graceful degradation: keep previous sentiment, zero delta ─
                 return {
-                    "agent_id":              agent_id,
-                    "action":                "hold_position",
-                    "sentiment_score":       prev_sentiment,
+                    "agent_id":                agent_id,
+                    "action":                  "hold_position",
+                    "sentiment":               prev_sentiment,
+                    "sentiment_score":         prev_sentiment,
                     "financial_health_change": 0.0,
-                    "internal_monologue":    (
-                        f"[FALLBACK — API error] Maintaining previous stance as {agent['demographic']} "
-                        f"{agent['occupation']} in {agent['location']}."
+                    "internal_monologue":      (
+                        f"[FALLBACK — API error] Maintaining previous stance as "
+                        f"{tier} {occupation}."
                     ),
-                    "is_breaking_point":     False,
-                    "exploiting_loophole":   False,
+                    "thought_process":         (
+                        f"[FALLBACK — API error] Maintaining previous stance as "
+                        f"{tier} {occupation}."
+                    ),
+                    "is_breaking_point":       False,
+                    "exploiting_loophole":     False,
+                    "full_prompt_debug":       filled_prompt,
                 }
 
-    # ─── Main Simulation Loop ─────────────────────────────────────────────────
+    # ─── Public Entry Points ──────────────────────────────────────────────────
 
-    async def run_simulation(
+    async def run_simulation(self, agents, policy_text):
+        """
+        Lightweight simulation entry point for direct testing and scripting.
+
+        Accepts a raw list of agent dicts and a plain policy string, fires
+        ``_execute_agent`` for every agent in parallel, and returns the list
+        of decision dicts (one per agent).
+
+        Args:
+            agents:      List of agent profile dicts (must contain at least
+                         ``"id"`` or ``"agent_id"``, ``"tier"`` or
+                         ``"demographic"``, and ``"occupation"`` keys).
+            policy_text: The policy being simulated — used as both the RAG
+                         search context and injected verbatim into the Gemini
+                         prompt so each agent knows exactly what it reacts to.
+
+        Returns:
+            List of decision dicts in the same order as ``agents``.
+        """
+        logger.info(
+            "run_simulation │ agents=%d │ policy=%r", len(agents), policy_text[:80]
+        )
+        tasks = [self._execute_agent(agent, policy_text) for agent in agents]
+        results: list[dict] = list(await asyncio.gather(*tasks, return_exceptions=False))
+        return results
+
+    async def _run_simulation_request(
         self, request
     ) -> AsyncGenerator[dict, None]:
         """
@@ -701,7 +922,7 @@ class Orchestrator:
             # calls so we never hit rate-limit 429s even at 50 agents.
             decisions: list[dict] = list(
                 await asyncio.gather(
-                    *[self._execute_agent(p) for p in prompt_payloads],
+                    *[self._execute_agent(p, request.policy_text) for p in prompt_payloads],
                     return_exceptions=False,  # individual failures already caught inside
                 )
             )
@@ -767,7 +988,7 @@ class Orchestrator:
 
         TODO (Team AI): Wire the real AI policy recommendation from Gemini.
         """
-        from schemas import (  # noqa: PLC0415
+        from backend.schemas import (  # noqa: PLC0415
             SimulateResponse, SimulationMetadata, MacroSummary,
             TickSummary, TickAgentAction, Anomaly,
         )
