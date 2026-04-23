@@ -77,28 +77,126 @@ class Orchestrator:
     @staticmethod
     def _synthetic_agents(count: int) -> list[dict]:
         """
-        Generate minimal synthetic agents for local dev/testing.
+        Generate realistic synthetic Economic Entity agents for local dev/testing.
+
+        Each agent is seeded with tier-appropriate economic metadata so the LLM
+        can make financially grounded decisions.  Ranges are calibrated against
+        2023 DOSM household income data:
+
+        Tier     | monthly_income_rm | liquid_savings_rm | digital_readiness_score
+        ---------+-------------------+-------------------+------------------------
+        B40      | 2,000 – 4,850     | 200  – 2,000      | 0.15 – 0.50
+        M40      | 4,850 – 10,959    | 2,000 – 15,000    | 0.45 – 0.78
+        T20      | 10,960 +          | 15,000 – 80,000   | 0.72 – 0.98
+
         Team AI: replace with real 50-agent DNA from agents_master.json.
         """
+        import random  # noqa: PLC0415
+
         tiers = ["B40", "M40", "T20"]
         occupations = ["Gig Worker", "Salaried Corporate", "SME Owner", "Civil Servant", "Unemployed"]
         locations = ["Urban KL", "Suburban Selangor", "Rural Sabah"]
+
+        # ── Per-tier economic parameter ranges ─────────────────────────────────
+        tier_config: dict[str, dict] = {
+            "B40": {
+                "income_range":        (2000.0,  4849.0),
+                "savings_range":       (200.0,   2000.0),
+                "dti_range":           (0.35,    0.65),   # high debt burden
+                "dependents_range":    (2, 5),
+                "readiness_range":     (0.15,    0.50),   # limited digital access
+                "subsidy_flags": {
+                    "brim": True,
+                    "petrol_quota": True,
+                    "padu_registered": False,   # friction barrier
+                    "oku_allowance": False,
+                },
+            },
+            "M40": {
+                "income_range":        (4850.0,  10959.0),
+                "savings_range":       (2000.0,  15000.0),
+                "dti_range":           (0.20,    0.45),
+                "dependents_range":    (1, 3),
+                "readiness_range":     (0.45,    0.78),
+                "subsidy_flags": {
+                    "brim": False,
+                    "petrol_quota": False,
+                    "padu_registered": True,
+                    "oku_allowance": False,
+                },
+            },
+            "T20": {
+                "income_range":        (10960.0, 30000.0),
+                "savings_range":       (15000.0, 80000.0),
+                "dti_range":           (0.05,    0.25),   # low relative debt
+                "dependents_range":    (0, 2),
+                "readiness_range":     (0.72,    0.98),   # high digital fluency
+                "subsidy_flags": {
+                    "brim": False,
+                    "petrol_quota": False,
+                    "padu_registered": True,
+                    "oku_allowance": False,
+                },
+            },
+        }
+
         agents = []
         for i in range(count):
+            tier = tiers[i % len(tiers)]
+            cfg  = tier_config[tier]
+
+            income   = round(random.uniform(*cfg["income_range"]), 2)
+            savings  = round(random.uniform(*cfg["savings_range"]), 2)
+            dti      = round(random.uniform(*cfg["dti_range"]), 4)
+            deps     = random.randint(*cfg["dependents_range"])
+            readiness = round(random.uniform(*cfg["readiness_range"]), 4)
+
+            # Disposable buffer = income after debt service and a rough 40 % fixed-cost estimate
+            fixed_costs = round(income * 0.40, 2)
+            debt_payments = round(income * dti, 2)
+            disposable_buffer = round(income - fixed_costs - debt_payments, 2)
+
             agents.append({
-                "agent_id": f"AGT-{i+1:03d}",
-                "demographic": tiers[i % len(tiers)],
-                "occupation": occupations[i % len(occupations)],
-                "location": locations[i % len(locations)],
-                "financial_health": 1000.0,
+                "agent_id":   f"AGT-{i+1:03d}",
+                "demographic": tier,
+                "occupation":  occupations[i % len(occupations)],
+                "location":    locations[i % len(locations)],
+                "financial_health": savings,  # seed financial_health from liquid savings
+
+                # ── Economic Entity Fields ──────────────────────────────────
+                "monthly_income_rm":     income,
+                "disposable_buffer_rm":  disposable_buffer,
+                "liquid_savings_rm":     savings,
+                "debt_to_income_ratio":  dti,
+                "dependents_count":      deps,
+                "digital_readiness_score": readiness,
+                "subsidy_flags":         dict(cfg["subsidy_flags"]),  # copy, not reference
+
+                # ── Sensitivity Matrix ──────────────────────────────────────
                 "sensitivity_matrix": {
-                    "disposable_income_delta": round(0.5 + (i % 5) * 0.1, 1),
-                    "operational_expense_index": 0.5,
-                    "capital_access_pressure": 0.4,
-                    "systemic_friction": round(0.3 + (i % 3) * 0.2, 1),
-                    "social_equity_weight": 0.6,
-                    "systemic_trust_baseline": 0.5,
-                    "future_mobility_index": 0.4,
+                    # B40 agents feel disposable income changes most acutely
+                    "disposable_income_delta": round(
+                        0.9 if tier == "B40" else (0.6 if tier == "M40" else 0.3), 1
+                    ),
+                    "operational_expense_index": round(
+                        0.8 if tier == "B40" else (0.5 if tier == "M40" else 0.3), 1
+                    ),
+                    "capital_access_pressure": round(
+                        0.7 if tier == "B40" else (0.5 if tier == "M40" else 0.2), 1
+                    ),
+                    # High systemic_friction hits low-readiness agents hardest
+                    "systemic_friction": round(
+                        max(0.1, 1.0 - readiness), 2
+                    ),
+                    "social_equity_weight": round(
+                        0.8 if tier == "B40" else (0.5 if tier == "M40" else 0.2), 1
+                    ),
+                    "systemic_trust_baseline": round(
+                        0.4 if tier == "B40" else (0.6 if tier == "M40" else 0.8), 1
+                    ),
+                    "future_mobility_index": round(
+                        0.3 if tier == "B40" else (0.5 if tier == "M40" else 0.9), 1
+                    ),
                     "ecological_pressure": 0.2,
                 },
             })

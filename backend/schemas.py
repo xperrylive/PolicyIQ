@@ -5,7 +5,7 @@ Mirrors the JSON schemas defined in CLAUDE.md exactly.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Dict, Optional
 from pydantic import BaseModel, Field
 
 
@@ -143,12 +143,55 @@ class SensitivityMatrix(BaseModel):
 
 
 class AgentProfile(BaseModel):
-    """Static Agent DNA profile for a single Digital Malaysian."""
+    """Static Agent DNA profile for a single Digital Malaysian (Economic Entity)."""
     agent_id: str = Field(..., example="AGT-012")
     demographic: str = Field(..., example="B40")
     occupation: str = Field(..., example="Gig Worker")
     location: str = Field(..., example="Urban KL")
     sensitivity_matrix: SensitivityMatrix
+
+    # ── Economic Entity Fields (Stream 1 Upgrade) ──────────────────────────
+    monthly_income_rm: float = Field(
+        ...,
+        gt=0,
+        description="Agent's gross monthly income in Malaysian Ringgit.",
+        example=3500.0,
+    )
+    disposable_buffer_rm: float = Field(
+        ...,
+        description="Cash remaining after fixed obligations (rent, utilities, debt). Can be negative.",
+        example=450.0,
+    )
+    liquid_savings_rm: float = Field(
+        ...,
+        ge=0.0,
+        description="Total immediately accessible savings in RM.",
+        example=1200.0,
+    )
+    debt_to_income_ratio: float = Field(
+        ...,
+        ge=0.0,
+        description="Total monthly debt payments divided by monthly income (0.0 = no debt).",
+        example=0.35,
+    )
+    dependents_count: int = Field(
+        ...,
+        ge=0,
+        description="Number of financial dependents (children, elderly parents, etc.).",
+        example=2,
+    )
+    digital_readiness_score: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Composite score for digital literacy and infrastructure access (0.0 = none, 1.0 = fully ready).",
+        example=0.55,
+    )
+    subsidy_flags: Dict[str, bool] = Field(
+        default_factory=dict,
+        description="Boolean flags for active government subsidy eligibility (e.g. {\"brim\": true, \"petrol_quota\": false}).",
+        example={"brim": True, "petrol_quota": False, "padu_registered": True},
+    )
 
 
 class AgentPromptPayload(BaseModel):

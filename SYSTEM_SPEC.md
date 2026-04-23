@@ -41,12 +41,31 @@ Knobs are translated into 3 to 5 concrete "Sub-Layers" specific to the input pol
 
 ---
 
-## 5. Agent DNA (The Digital Malaysians)
-50 agents with static profiles:
-* **Income Tier:** B40, M40, T20.
+## 5. Agent DNA — Economic Entities (The Digital Malaysians)
+Each of the 50 agents is a fully parameterised **Economic Entity**, not merely a demographic label. Static profile fields:
+
+### 5.1 Identity Fields
+* **Income Tier:** B40, M40, T20 (mapped to DOSM household income thresholds).
 * **Occupation Type:** Gig Worker, Salaried Corporate, SME Owner, Civil Servant, Unemployed.
 * **Location Matrix:** Urban, Suburban, Rural.
-* **Sensitivity Matrix:** A dictionary assigning a weight (0.0 to 1.0) to each of the 8 Knobs based on their demographic.
+
+### 5.2 Sensitivity Matrix
+A dictionary assigning a weight (0.0 to 1.0) to each of the 8 Knobs based on the agent's demographic. Tier-calibrated: B40 agents have highest sensitivity to `disposable_income_delta` (0.9) and `systemic_friction` (inversely proportional to `digital_readiness_score`).
+
+### 5.3 Economic Entity Fields (Stream 1 — New)
+All new fields are enforced by `AgentProfile` (Pydantic v2, `schemas.py`).
+
+| Field | Type | Constraint | B40 Range | M40 Range | T20 Range |
+|---|---|---|---|---|---|
+| `monthly_income_rm` | float | > 0 | 2,000–4,849 RM | 4,850–10,959 RM | 10,960–30,000 RM |
+| `disposable_buffer_rm` | float | none | derived | derived | derived |
+| `liquid_savings_rm` | float | ≥ 0 | 200–2,000 RM | 2,000–15,000 RM | 15,000–80,000 RM |
+| `debt_to_income_ratio` | float | ≥ 0 | 0.35–0.65 | 0.20–0.45 | 0.05–0.25 |
+| `dependents_count` | int | ≥ 0 | 2–5 | 1–3 | 0–2 |
+| `digital_readiness_score` | float | 0.0–1.0 | 0.15–0.50 | 0.45–0.78 | 0.72–0.98 |
+| `subsidy_flags` | Dict[str, bool] | — | brim=T, petrol=T | brim=F | brim=F |
+
+`disposable_buffer_rm` is derived: `income − (income × 0.40 fixed costs) − (income × debt_to_income_ratio)`. A negative value means the agent is already running a monthly deficit before any policy effect.
 
 ---
 

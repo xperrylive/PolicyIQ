@@ -11,8 +11,8 @@
 **Core Focus:** The Python-based physics engine, environment math, and LLM intelligence.
 * **The Global State Engine:** Manages time progression (Ticks) and the mathematical state of the 8 Universal Knobs.
 * **Dynamic Decomposition:** Uses Gemini to translate policy text into exactly 3 to 5 highly targeted sub-layers (enforcing the `target_demographic` and `impact_multiplier` rules).
-* **Agent DNA & Generation:** Maintains the JSON profiles for the 50 unique demographic citizens (B40, M40, T20, locations, and sensitivity weights).
-* **The Observation Generator:** Retrieves RAG data from Vertex AI and constructs the localized, math-adjusted prompt for each agent per tick.
+* **Agent DNA & Economic Entities:** Maintains the JSON profiles for the 50 unique demographic citizens. Each agent is now a full **Economic Entity** with income, savings, debt, dependents, digital readiness, and subsidy eligibility — not just a demographic label.
+* **The Observation Generator:** Retrieves RAG data from Vertex AI and constructs the localized, math-adjusted prompt for each agent per tick. The prompt explicitly instructs Gemini to use each agent's economic signals when computing `sentiment_score` and `internal_monologue`.
 * **Genkit Orchestration:** Executes the agents in parallel using Firebase Genkit, ensuring strict JSON compliance.
 
 ### ⚙️ Stream 2: Team Backend (Infrastructure & API Gateway)
@@ -112,6 +112,18 @@ JSON
     "sensitivity_matrix": {
       "disposable_income_delta": 0.9,
       "systemic_friction": 0.7
+    },
+    "monthly_income_rm": 2800.0,
+    "disposable_buffer_rm": 120.0,
+    "liquid_savings_rm": 450.0,
+    "debt_to_income_ratio": 0.52,
+    "dependents_count": 3,
+    "digital_readiness_score": 0.28,
+    "subsidy_flags": {
+      "brim": true,
+      "petrol_quota": true,
+      "padu_registered": false,
+      "oku_allowance": false
     }
   },
   "rag_context": "According to DOSM, average B40 household income in KL is RM 3,000.",
