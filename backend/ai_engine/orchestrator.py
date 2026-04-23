@@ -835,6 +835,105 @@ class Orchestrator:
                     "full_prompt_debug":       filled_prompt,
                 }
 
+    # ─── Executive Summary ────────────────────────────────────────────────────
+
+    async def generate_summary(self, results: list[dict], policy_text: str) -> str:
+        """
+        Contract F: Generate a high-level executive summary after all agents finish.
+
+        Acts as the Malaysian Chief Economist reviewing 50 citizen reactions and
+        producing a structured verdict covering:
+          1. Overall Sentiment (Success / Failure)
+          2. Demographic 'Loser' — who is hit hardest
+          3. Social Stability Score (0–100 %)
+
+        Args:
+            results:     List of agent decision dicts (one per agent) containing
+                         at minimum ``agent_id``, ``sentiment_score``, and
+                         ``internal_monologue``.
+            policy_text: The raw policy string that was simulated.
+
+        Returns:
+            Plain-text executive summary string from Gemini 1.5 Flash.
+            Falls back to a structured fallback string if the API call fails.
+        """
+        logger.info(
+            "generate_summary │ agents=%d │ policy=%r", len(results), policy_text[:80]
+        )
+
+        # ── Build a compact digest of each agent's reaction ───────────────────
+        # Keep tokens lean: agent_id, demographic, sentiment_score, monologue.
+        agent_digest_lines: list[str] = []
+        for r in results:
+            agent_id   = r.get("agent_id", "?")
+            sentiment  = round(float(r.get("sentiment_score", r.get("sentiment", 0.0))), 3)
+            monologue  = str(r.get("internal_monologue", r.get("thought_process", ""))).strip()
+            # Truncate long monologues so the combined prompt stays < 30 k tokens
+            monologue  = monologue[:300] if len(monologue) > 300 else monologue
+            agent_digest_lines.append(
+                f"- [{agent_id}] sentiment={sentiment:+.3f} | {monologue}"
+            )
+
+        agent_digest = "\n".join(agent_digest_lines)
+
+        summary_prompt = (
+            "You are the Malaysian Chief Economist. "
+            f"Review these {len(results)} citizen reactions to the policy: '{policy_text}'. "
+            "Provide a high-level executive summary covering exactly these three points:\n\n"
+            "1. **Overall Sentiment** — Was this policy a Success or Failure? "
+            "State the verdict clearly and explain the key reason in 2–3 sentences.\n\n"
+            "2. **Demographic 'Loser'** — Which demographic group is hit hardest "
+            "(B40 / M40 / T20 / Rural / Urban)? Quantify the impact if possible.\n\n"
+            "3. **Social Stability Score** — Provide a single integer from 0 to 100 "
+            "representing overall societal stability after this policy "
+            "(0 = total collapse, 100 = perfect stability). "
+            "Show your reasoning in one sentence.\n\n"
+            "--- AGENT REACTIONS ---\n"
+            f"{agent_digest}\n"
+            "--- END AGENT REACTIONS ---\n\n"
+            "Write the executive summary now. Be concise but authoritative."
+        )
+
+        try:
+            loop = asyncio.get_event_loop()
+            model = GenerativeModel(self._gemini_model)
+
+            response = await loop.run_in_executor(
+                None,
+                lambda: model.generate_content(
+                    summary_prompt,
+                    generation_config=GenerationConfig(
+                        temperature=0.3,
+                        max_output_tokens=1024,
+                    ),
+                ),
+            )
+
+            summary_text = response.text.strip()
+            logger.info(
+                "generate_summary ✓ │ length=%d chars", len(summary_text)
+            )
+            return summary_text
+
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("generate_summary Gemini call failed: %s", exc)
+            # ── Structured fallback so the frontend always gets something ─────
+            avg_sentiment = (
+                sum(float(r.get("sentiment_score", r.get("sentiment", 0.0))) for r in results)
+                / len(results)
+                if results else 0.0
+            )
+            verdict = "Success" if avg_sentiment >= 0.0 else "Failure"
+            return (
+                f"**Executive Summary (Fallback — AI unavailable)**\n\n"
+                f"1. **Overall Sentiment**: {verdict} "
+                f"(average sentiment score: {avg_sentiment:+.3f})\n\n"
+                f"2. **Demographic 'Loser'**: Unable to determine — "
+                f"AI summary service temporarily unavailable.\n\n"
+                f"3. **Social Stability Score**: N/A — "
+                f"please retry the simulation for a full assessment."
+            )
+
     # ─── Public Entry Points ──────────────────────────────────────────────────
 
     async def run_simulation(self, agents, policy_text):

@@ -138,7 +138,7 @@ async def simulate(request: SimulateRequest) -> EventSourceResponse:
             from backend.ai_engine.policy_validator import PolicyValidator
             validator = PolicyValidator()
             val_result = await validator.validate(request.policy_text)
-            
+
             if not val_result.get("is_feasible", True):
                 yield {
                     "event": "error",
@@ -150,12 +150,38 @@ async def simulate(request: SimulateRequest) -> EventSourceResponse:
                 }
                 return
 
+            # Collect every agent decision across all ticks for the summary
+            all_agent_results: list[dict] = []
+
             async for tick_payload in request_orchestrator._run_simulation_request(request):
                 yield {
                     "event": "tick",
                     "data": json.dumps(tick_payload),
                 }
-            # Final aggregated result
+                # Accumulate agent decisions (one list entry per agent per tick)
+                all_agent_results.extend(tick_payload.get("agent_actions", []))
+
+            # ── Executive Summary (Chief Economist) ───────────────────────────
+            # Use the last tick's agent results so each agent is represented
+            # once with their final state — avoids double-counting across ticks.
+            last_tick_results = (
+                request_orchestrator._tick_results[-1]["agent_actions"]
+                if request_orchestrator._tick_results
+                else all_agent_results
+            )
+            logger.info(
+                "Generating executive summary │ agents=%d", len(last_tick_results)
+            )
+            summary_text = await request_orchestrator.generate_summary(
+                results=last_tick_results,
+                policy_text=request.policy_text,
+            )
+            yield {
+                "event": "summary",
+                "data": json.dumps({"type": "summary", "content": summary_text}),
+            }
+
+            # ── Final aggregated result ───────────────────────────────────────
             final: SimulateResponse = await request_orchestrator.get_final_result()
             yield {
                 "event": "complete",
