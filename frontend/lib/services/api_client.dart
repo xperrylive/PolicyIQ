@@ -14,6 +14,9 @@ import '../models/contracts.dart';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
+// DEPLOYMENT NOTE: Update this URL when deploying to Cloud Run
+// Local dev:  'http://127.0.0.1:8000'
+// Cloud Run:  'https://policyiq-backend-<hash>-as.a.run.app'
 const String _kApiBaseUrl =
     String.fromEnvironment('API_BASE_URL', defaultValue: 'http://127.0.0.1:8000');
 
@@ -47,13 +50,18 @@ class ApiClient {
       }
       throw ApiException(response.statusCode, response.body);
     } on SocketException catch (e) {
+      // Backend unreachable - log to console for debugging
+      // ignore: avoid_print
       print('[API_CLIENT] SocketException: Backend is unreachable at $baseUrl');
+      // ignore: avoid_print
       print('[API_CLIENT] Error details: $e');
       throw ApiException(
         503,
         'Backend is unreachable. Please ensure the FastAPI server is running at $baseUrl',
       );
     } catch (e) {
+      // Unexpected error - log to console for debugging
+      // ignore: avoid_print
       print('[API_CLIENT] Unexpected error in validatePolicy: $e');
       rethrow;
     }

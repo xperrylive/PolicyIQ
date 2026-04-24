@@ -18,5 +18,10 @@ COPY . .
 # Expose the API port
 EXPOSE 8000
 
+# Health check for Cloud Run
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD curl -f http://localhost:8000/health || exit 1
+
 # Run uvicorn on container start
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Use 4 workers for better concurrency on Cloud Run (2 vCPU instance)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
