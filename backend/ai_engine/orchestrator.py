@@ -32,6 +32,7 @@ from typing import AsyncGenerator, Optional
 from groq import Groq
 
 from backend.ai_engine.physics import GlobalStateEngine
+from backend.ai_engine.key_manager import KeyManager
 
 # ─── RAGClient import — retained for Vertex AI Search scaling readiness ───────
 # Not used for active inference (local search is primary), but kept to
@@ -252,10 +253,9 @@ class Orchestrator:
         final = await orchestrator.get_final_result()          # Contract E
     """
 
-    # Limits concurrent Groq API calls to stay within RPM budget.
-    # At 50 agents × N ticks, semaphore(10) keeps throughput high while
-    # preventing burst 429s on the Groq endpoint.
-    semaphore = asyncio.Semaphore(10)
+    # Concurrency guard: match the number of API keys to prevent rate limit bursts
+    # Will be dynamically set based on available keys
+    semaphore = None
 
     def __init__(self) -> None:
         self._physics      = GlobalStateEngine()
@@ -263,16 +263,36 @@ class Orchestrator:
         self._tick_results: list[dict] = []
         self._agents:       list[dict] = []
         self._groq_model   = os.getenv("GROQ_MODEL", _GROQ_MODEL_DEFAULT)
-        self._groq_client  = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        
+        # Initialize key manager and set semaphore limit to match key count
+        self._key_manager = KeyManager()
+        key_count = self._key_manager.get_key_count()
+        
+        # Set class-level semaphore to match available keys
+        if Orchestrator.semaphore is None:
+            Orchestrator.semaphore = asyncio.Semaphore(key_count)
+        
         logger.info(
             "[Hybrid Inference] Orchestrator initialised — "
-            "active inference engine: Groq / %s",
-            self._groq_model,
+            "active inference engine: Groq / %s | API keys: %d",
+            self._groq_model, key_count,
         )
 
-    # ─── RAG Truth Layer ──────────────────────────────────────────────────────
+    def _get_groq_client(self) -> Groq:
+        """
+        Get a Groq client with the next available API key.
+        Each call gets a fresh key from the round-robin pool.
+        """
+        api_key = self._key_manager.get_next_key()
+        return Groq(api_key=api_key)
 
-    def _get_agent_context(self, tier: str, occupation: str, policy_text: str) -> str:
+    def _get_groq_client(self) -> Groq:
+        """
+        Get a Groq client with the next available API key.
+        Each call gets a fresh key from the round-robin pool.
+        """
+        api_key = self._key_manager.get_next_key()
+        return Groq(api_key=api_key)
         """
         Delegate to the module-level _cached_local_search (PRIMARY RAG source).
 
@@ -441,9 +461,10 @@ class Orchestrator:
         try:
             logger.info("[Multi-Model] Calling Groq API for policy validation...")
             loop     = asyncio.get_event_loop()
+            groq_client = self._get_groq_client()
             response = await loop.run_in_executor(
                 None,
-                lambda: self._groq_client.chat.completions.create(
+                lambda: groq_client.chat.completions.create(
                     model=self._groq_model,
                     messages=[
                         {"role": "system", "content": "You are a policy analyst and blueprint generator. Respond with valid JSON only."},
@@ -746,9 +767,10 @@ class Orchestrator:
         for attempt in range(max_retries):
             try:
                 loop     = asyncio.get_event_loop()
+                groq_client = self._get_groq_client()
                 response = await loop.run_in_executor(
                     None,
-                    lambda: self._groq_client.chat.completions.create(
+                    lambda: groq_client.chat.completions.create(
                         model=self._groq_model,
                         messages=[
                             {"role": "system", "content": "You are a policy decomposition engine. Respond with valid JSON only."},
@@ -974,9 +996,10 @@ class Orchestrator:
             try:
                 async with Orchestrator.semaphore:
                     loop     = asyncio.get_event_loop()
+                    groq_client = self._get_groq_client()
                     response = await loop.run_in_executor(
                         None,
-                        lambda: self._groq_client.chat.completions.create(
+                        lambda: groq_client.chat.completions.create(
                             model=self._groq_model,
                             messages=[
                                 {"role": "system", "content": "You are simulating a Malaysian citizen's economic response. Respond with valid JSON only."},
@@ -1125,9 +1148,10 @@ class Orchestrator:
             try:
                 async with Orchestrator.semaphore:
                     loop     = asyncio.get_event_loop()
+                    groq_client = self._get_groq_client()
                     response = await loop.run_in_executor(
                         None,
-                        lambda: self._groq_client.chat.completions.create(
+                        lambda: groq_client.chat.completions.create(
                             model=self._groq_model,
                             messages=[
                                 {"role": "system", "content": "You are the Malaysian Chief Economist. Be concise and authoritative."},

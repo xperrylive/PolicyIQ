@@ -200,10 +200,16 @@ class SimulationState extends ChangeNotifier {
 
   void setSimulating() {
     _status = SimulationStatus.simulating;
+    
+    // Clean slate: wipe all previous simulation data
     ticks = [];
     finalResult = null;
     simulationError = null;
     rewardStabilityHistory = [];
+    
+    // Clear any comparison scenario to avoid confusion
+    comparisonScenarioId = null;
+    
     notifyListeners();
   }
 
@@ -213,6 +219,13 @@ class SimulationState extends ChangeNotifier {
       ...rewardStabilityHistory,
       tick.rewardStabilityScore
     ];
+    
+    // Immediate unrest detection - trigger red glow if stability < 40
+    if (tick.rewardStabilityScore < 40) {
+      // This will trigger UI updates immediately via notifyListeners
+      // The dashboard will detect this in the build method and show red glow
+    }
+    
     notifyListeners();
   }
 
