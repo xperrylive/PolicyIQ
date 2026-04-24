@@ -175,17 +175,16 @@ def _cached_local_search(
 @define_flow(name="validation_flow")
 async def validation_flow(policy_text: str) -> dict:
     """
-    Genkit Flow: Policy Validator.
-    Provides a feasibility and risk sanity-check before simulation begins.
+    Genkit Flow: Policy Validator + Blueprint Generator.
+    Validates feasibility and — when feasible — generates the full
+    EnvironmentBlueprint (8 Universal Knobs + 3–5 Dynamic Sublayers).
     Inference is executed via the Groq (Llama-3.3-70b) optimised engine.
     """
-    from backend.ai_engine.policy_validator import PolicyValidator
-    validator = PolicyValidator()
-    result = await ai.run(
-        "policy_feasibility_check",
-        lambda: validator.validate(policy_text)
-    )
-    return result
+    from backend.schemas import ValidatePolicyRequest  # noqa: PLC0415
+    orch    = Orchestrator()
+    request = ValidatePolicyRequest(raw_policy_text=policy_text)
+    result  = await orch.validate_policy(request)
+    return result.model_dump()
 
 
 @define_flow(name="simulation_flow")
@@ -296,12 +295,16 @@ class Orchestrator:
         logger.warning("Prompt template '%s' is empty or missing — using placeholder.", name)
         return f"[PLACEHOLDER: {name} — populate this prompt template]"
 
-    def _load_agents(self) -> list[dict]:
+    def _load_agents(self, count: int = 50) -> list[dict]:
         if AGENT_DNA_FILE.exists() and AGENT_DNA_FILE.stat().st_size > 5:
             with AGENT_DNA_FILE.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        logger.warning("agents_master.json is empty — using synthetic placeholder agents.")
-        return self._synthetic_agents(count=5)
+                agents = json.load(f)
+            logger.info("[Agent Population] Loaded %d agents from agents_master.json", len(agents))
+            return agents
+        logger.warning(
+            "agents_master.json is empty — generating %d synthetic agents.", count
+        )
+        return self._synthetic_agents(count=count)
 
     @staticmethod
     def _synthetic_agents(count: int) -> list[dict]:
@@ -417,10 +420,14 @@ class Orchestrator:
         Routes the gatekeeper.txt prompt to Groq (Llama-3.3-70b) for
         sub-second feasibility classification.
 
+        When feasible, also generates a full EnvironmentBlueprint with:
+          - 8 Universal Knob initial values (0.0–1.0)
+          - 3–5 Dynamic Sublayers representing the concrete policy physics
+
         Falls back to a safe "Invalid" response if the call fails or the
         model returns malformed JSON — the endpoint never crashes.
         """
-        from backend.schemas import ValidatePolicyResponse  # noqa: PLC0415
+        from backend.schemas import ValidatePolicyResponse, EnvironmentBlueprint  # noqa: PLC0415
 
         text              = request.raw_policy_text.strip()
         gatekeeper_prompt = self._load_prompt("gatekeeper.txt")
@@ -438,16 +445,16 @@ class Orchestrator:
                 lambda: self._groq_client.chat.completions.create(
                     model=self._groq_model,
                     messages=[
-                        {"role": "system", "content": "You are a policy analyst. Respond with valid JSON only."},
+                        {"role": "system", "content": "You are a policy analyst and blueprint generator. Respond with valid JSON only."},
                         {"role": "user",   "content": final_prompt},
                     ],
                     temperature=0.1,
-                    max_tokens=2048,
+                    max_tokens=3072,
                     response_format={"type": "json_object"},
                 ),
             )
             raw_text = response.choices[0].message.content.strip()
-            logger.info("[Multi-Model] Gatekeeper raw response: %s", raw_text[:300])
+            logger.info("[Multi-Model] Gatekeeper raw response: %s", raw_text[:500])
 
             payload = json.loads(self._clean_json_text(raw_text))
 
@@ -466,7 +473,28 @@ class Orchestrator:
                     )
                 payload["refined_options"] = payload["refined_options"][:3]
 
-            return ValidatePolicyResponse(**payload)
+            # Parse EnvironmentBlueprint when feasible
+            environment_blueprint = None
+            if payload.get("is_feasible", False):
+                raw_blueprint = payload.get("environment_blueprint")
+                if raw_blueprint and isinstance(raw_blueprint, dict):
+                    try:
+                        environment_blueprint = EnvironmentBlueprint(**raw_blueprint)
+                        logger.info(
+                            "[Gatekeeper] EnvironmentBlueprint generated ✓ │ sublayers=%d",
+                            len(environment_blueprint.dynamic_sublayers),
+                        )
+                    except Exception as bp_exc:
+                        logger.warning(
+                            "[Gatekeeper] EnvironmentBlueprint parse failed — omitting: %s", bp_exc
+                        )
+
+            return ValidatePolicyResponse(
+                is_feasible=payload.get("is_feasible", False),
+                rejection_reason=payload.get("rejection_reason"),
+                refined_options=payload.get("refined_options", []),
+                environment_blueprint=environment_blueprint,
+            )
 
         except Exception as exc:  # noqa: BLE001
             logger.exception("[Multi-Model] Gatekeeper inference failed — Smart Fallback triggered: %s", exc)
@@ -481,6 +509,7 @@ class Orchestrator:
                     "Ensure your policy contains a specific RM amount or percentage.",
                     "Make sure your policy targets a specific demographic (e.g. B40, M40, Rural).",
                 ],
+                environment_blueprint=None,
             )
 
     # ─── Dynamic Decomposition ────────────────────────────────────────────────
@@ -495,6 +524,92 @@ class Orchestrator:
         "future_mobility_index",
         "ecological_pressure",
     )
+
+    # ─── Demographic Sensitivity Profiles ────────────────────────────────────
+    # Per-demographic base sensitivity weights for each impact_type.
+    # These are multiplied against sublayer values in the RL observation formula:
+    #   State_update = Σ (sublayer_value × agent_sensitivity)
+    #
+    # B40: high sensitivity to 'expense' sublayers (cost of living hits hardest)
+    # T20: high sensitivity to 'taxation' sublayers (tax burden is primary concern)
+    # M40: balanced sensitivity across all types
+    _DEMOGRAPHIC_SENSITIVITY: dict[str, dict[str, float]] = {
+        "B40": {"expense": 0.90, "multiplier": 0.60, "income": 0.75},
+        "M40": {"expense": 0.55, "multiplier": 0.55, "income": 0.55},
+        "T20": {"expense": 0.30, "multiplier": 0.70, "income": 0.40},
+    }
+
+    def compute_rl_observation(
+        self,
+        agent: dict,
+        sublayers: list[dict],
+    ) -> dict[str, float]:
+        """
+        RL Observation Function — calculates the agent's specific state update
+        when it 'looks' at the environment.
+
+        Formula (LaTeX):
+            State_update = Σ (sublayer_value × agent_sensitivity)
+
+        Where:
+          - sublayer_value  = abs(policy_value - baseline_value) normalised by baseline
+          - agent_sensitivity = demographic base sensitivity for the sublayer's impact_type,
+                                further scaled by the agent's knob sensitivity_matrix
+
+        Sensitivity rules:
+          - B40 agents → high sensitivity (0.90) to 'expense' sublayers
+          - T20 agents → high sensitivity (0.70) to 'multiplier' sublayers (taxation proxy)
+          - M40 agents → balanced (0.55) across all types
+
+        Args:
+            agent:     Agent dict containing 'demographic' and 'sensitivity_matrix'.
+            sublayers: List of BlueprintSublayer-like dicts from the EnvironmentBlueprint.
+
+        Returns:
+            Dict mapping each parent_knob to its cumulative state_update score.
+        """
+        demographic = agent.get("demographic", "M40")
+        sensitivity_matrix: dict[str, float] = agent.get("sensitivity_matrix", {})
+        demo_sensitivity = self._DEMOGRAPHIC_SENSITIVITY.get(
+            demographic, self._DEMOGRAPHIC_SENSITIVITY["M40"]
+        )
+
+        knob_state_updates: dict[str, float] = {}
+
+        for sl in sublayers:
+            parent_knob  = sl.get("parent_knob", "")
+            impact_type  = sl.get("impact_type", "multiplier")
+            baseline     = float(sl.get("baseline_value", 0.0))
+            policy_val   = float(sl.get("policy_value", 0.0))
+
+            # Normalise sublayer delta: how large is the change relative to baseline?
+            if abs(baseline) > 1e-6:
+                sublayer_value = abs(policy_val - baseline) / abs(baseline)
+            else:
+                sublayer_value = abs(policy_val - baseline)
+
+            # Clamp to [0.0, 2.0] — a 200% change is the practical ceiling
+            sublayer_value = min(sublayer_value, 2.0)
+
+            # Base demographic sensitivity for this impact_type
+            base_sensitivity = demo_sensitivity.get(impact_type, 0.5)
+
+            # Scale by the agent's knob-level sensitivity (maps old knob names to
+            # new universal knob names via a best-effort lookup)
+            knob_sensitivity = sensitivity_matrix.get(parent_knob, 0.5)
+
+            # RL formula: State_update = sublayer_value × agent_sensitivity
+            state_update = sublayer_value * base_sensitivity * knob_sensitivity
+
+            knob_state_updates[parent_knob] = round(
+                knob_state_updates.get(parent_knob, 0.0) + state_update, 4
+            )
+
+        logger.debug(
+            "[RL Observation] Agent %s (%s) │ state_updates=%s",
+            agent.get("agent_id", "?"), demographic, knob_state_updates,
+        )
+        return knob_state_updates
 
     async def _decompose_policy(self, policy_text: str, knob_overrides: Optional[dict] = None) -> dict:
         """
@@ -710,6 +825,16 @@ class Orchestrator:
             .replace("{{rag_context}}",                prompt_payload.get("rag_context", ""))
             .replace("{{effective_knob_impact_json}}", json.dumps(effective_knob_impact, indent=2))
         )
+
+        # Append RL observation state_updates if available
+        rl_observation: dict = prompt_payload.get("rl_observation", {})
+        if rl_observation:
+            filled_prompt += (
+                "\n\n## RL Observation — Your Personal State Update Scores\n"
+                "These scores represent how strongly this policy's sublayers affect YOU "
+                "based on your demographic sensitivity profile. Higher = more impact.\n"
+                f"{json.dumps(rl_observation, indent=2)}"
+            )
 
         # ── Local RAG — PRIMARY grounding source ──────────────────────────────
         try:
@@ -996,7 +1121,11 @@ class Orchestrator:
         Yields a tick payload dict per tick for the SSE stream.
         """
         self._reset()
-        self._agents = self._load_agents()[: request.agent_count]
+        self._agents = self._load_agents(count=request.agent_count)[: request.agent_count]
+        logger.info(
+            "[Simulation] Starting │ policy=%.60s… │ ticks=%d │ agents=%d",
+            request.policy_text, request.simulation_ticks, len(self._agents),
+        )
 
         _overrides = request.knob_overrides.model_dump(exclude_none=True)
 
@@ -1019,16 +1148,42 @@ class Orchestrator:
                 agents=self._agents,
             )
             knob_state_dict = knob_state.to_dict()
-            world_update    = (
-                f"Month {tick_num}: The global economy shifts — "
-                f"disposable income delta is now {knob_state.disposable_income_delta:.2f}."
+
+            # ── ΔDI = Income − (Expenses × Inflation_Index) ───────────────────
+            # inflation_index derived from operational_expense_index knob (0→2x)
+            inflation_index = 1.0 + knob_state.operational_expense_index
+            avg_income      = (
+                sum(a.get("monthly_income_rm", 3000.0) for a in self._agents)
+                / max(len(self._agents), 1)
+            )
+            avg_expenses    = avg_income * 0.40  # fixed-cost baseline
+            avg_di_delta    = round(avg_income - (avg_expenses * inflation_index), 2)
+
+            world_update = (
+                f"Month {tick_num}: Policy in effect. "
+                f"Avg Disposable Income Δ = RM {avg_di_delta:+.2f} "
+                f"(Income RM {avg_income:.0f} − Expenses×{inflation_index:.2f}). "
+                f"Knob state: disposable_income_delta={knob_state.disposable_income_delta:.2f}, "
+                f"operational_expense_index={knob_state.operational_expense_index:.2f}, "
+                f"systemic_trust={knob_state.systemic_trust_baseline:.2f}."
             )
 
             # ── Step 2: Build all agent prompt payloads ────────────────────────
             prompt_payloads: list[dict] = []
             for agent in self._agents:
-                payload              = await self._build_agent_prompt(agent, tick_num, world_update)
+                payload               = await self._build_agent_prompt(agent, tick_num, world_update)
                 payload["knob_state"] = knob_state_dict
+
+                # ── RL Observation: inject per-agent state_update scores ───────
+                # Uses the EnvironmentBlueprint sublayers when available,
+                # falling back to an empty list (no sublayer impact).
+                blueprint_sublayers: list[dict] = []
+                if self._decomposition:
+                    # dynamic_sub_layers from PolicyDecomposition (legacy knob names)
+                    blueprint_sublayers = self._decomposition.get("dynamic_sub_layers", [])
+                rl_observation = self.compute_rl_observation(agent, blueprint_sublayers)
+                payload["rl_observation"] = rl_observation
+
                 prompt_payloads.append(payload)
 
             # ── Step 3: Parallel Decision Swarm ───────────────────────────────
@@ -1051,6 +1206,12 @@ class Orchestrator:
             for agent, decision in zip(self._agents, decisions):
                 delta = decision["financial_health_change"]
                 agent["sentiment_score"] = decision["sentiment_score"]
+
+                # ΔDI = Income − (Expenses × Inflation_Index) per agent
+                income          = agent.get("monthly_income_rm", 3000.0)
+                expenses        = income * 0.40
+                agent_di_delta  = round(income - (expenses * inflation_index), 2)
+                decision["disposable_income_delta_rm"] = agent_di_delta
 
                 agent["disposable_buffer_rm"] = round(
                     agent.get("disposable_buffer_rm", 0.0) + delta, 2
@@ -1081,10 +1242,12 @@ class Orchestrator:
             )
 
             tick_payload = {
-                "tick_id":           tick_num,
-                "average_sentiment": round(avg_sentiment, 4),
-                "agent_actions":     decisions,
-                "knob_state":        knob_state_dict,
+                "tick_id":                    tick_num,
+                "average_sentiment":          round(avg_sentiment, 4),
+                "agent_actions":              decisions,
+                "knob_state":                 knob_state_dict,
+                "avg_disposable_income_delta": avg_di_delta,
+                "inflation_index":            round(inflation_index, 4),
             }
             self._tick_results.append(tick_payload)
             yield tick_payload

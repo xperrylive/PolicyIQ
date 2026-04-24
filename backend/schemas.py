@@ -5,8 +5,104 @@ Mirrors the JSON schemas defined in CLAUDE.md exactly.
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Environment Blueprint  │  AI-Driven Hierarchical Environment Structure
+# ─────────────────────────────────────────────────────────────────────────────
+
+# The 8 Universal Knob names (canonical identifiers used across the system)
+UNIVERSAL_KNOB_NAMES: List[str] = [
+    "cost_of_living",
+    "direct_assistance",
+    "taxation_and_revenue",
+    "labor_and_wages",
+    "healthcare_access",
+    "education_quality",
+    "infrastructure",
+    "market_stability",
+]
+
+
+class BlueprintSublayer(BaseModel):
+    """
+    A single AI-generated Dynamic Sublayer nested under a Universal Knob.
+    Represents the concrete 'physics' of a policy (e.g. RON95_Price under
+    Cost of Living for a petrol hike policy).
+    """
+    name: str = Field(..., description="Human-readable sublayer name (e.g. 'RON95_Price').")
+    parent_knob: str = Field(
+        ...,
+        description="Which of the 8 Universal Knobs this sublayer belongs to.",
+    )
+    impact_type: Literal["expense", "multiplier", "income"] = Field(
+        ...,
+        description=(
+            "expense   — directly increases agent cost burden.\n"
+            "multiplier — scales the parent knob's effect on the agent.\n"
+            "income    — directly increases agent income/benefit."
+        ),
+    )
+    baseline_value: float = Field(
+        ...,
+        description="Pre-policy baseline value in the given unit.",
+        example=2.05,
+    )
+    policy_value: float = Field(
+        ...,
+        description="Post-policy value after the intervention takes effect.",
+        example=3.35,
+    )
+    unit: str = Field(
+        ...,
+        description="Unit of measurement (e.g. 'RM/litre', '%', 'RM/month', 'index').",
+        example="RM/litre",
+    )
+
+
+class UniversalKnobs(BaseModel):
+    """
+    The 8 Universal Knobs — AI-seeded initial values in [0.0, 1.0].
+    0.0 = minimum policy pressure / benefit.
+    1.0 = maximum policy pressure / benefit.
+    """
+    cost_of_living:      float = Field(..., ge=0.0, le=1.0)
+    direct_assistance:   float = Field(..., ge=0.0, le=1.0)
+    taxation_and_revenue: float = Field(..., ge=0.0, le=1.0)
+    labor_and_wages:     float = Field(..., ge=0.0, le=1.0)
+    healthcare_access:   float = Field(..., ge=0.0, le=1.0)
+    education_quality:   float = Field(..., ge=0.0, le=1.0)
+    infrastructure:      float = Field(..., ge=0.0, le=1.0)
+    market_stability:    float = Field(..., ge=0.0, le=1.0)
+
+
+class EnvironmentBlueprint(BaseModel):
+    """
+    The AI-Driven Environmental Blueprint powering the MARL loop.
+
+    Returned by /validate-policy so the Flutter frontend can automatically
+    position all 8 sliders to the AI's suggested baseline and render the
+    Dynamic Sublayers as contextual physics cards.
+    """
+    policy_summary: str = Field(
+        ...,
+        description="One-sentence AI summary of the policy being blueprinted.",
+    )
+    universal_knobs: UniversalKnobs = Field(
+        ...,
+        description="AI-seeded initial values (0.0–1.0) for the 8 Universal Knobs.",
+    )
+    dynamic_sublayers: List[BlueprintSublayer] = Field(
+        ...,
+        min_length=3,
+        max_length=5,
+        description=(
+            "3–5 AI-generated sublayers representing the concrete physics of the policy. "
+            "Each sublayer is nested under one of the 8 Universal Knobs."
+        ),
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -28,7 +124,10 @@ class ValidatePolicyRequest(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ValidatePolicyResponse(BaseModel):
-    """Contract Pre-B: Gatekeeper verdict — feasible or rejected with refinements."""
+    """Contract Pre-B: Gatekeeper verdict — feasible or rejected with refinements.
+    When feasible, also returns the full EnvironmentBlueprint so the Flutter
+    frontend can auto-position all 8 sliders to the AI's suggested baseline.
+    """
     is_feasible: bool = Field(..., description="True if the policy passes Gatekeeper checks.")
     rejection_reason: Optional[str] = Field(
         None,
@@ -42,6 +141,14 @@ class ValidatePolicyResponse(BaseModel):
             "Implement a targeted RM100 monthly cash transfer to the B40 demographic via PADU.",
             "Introduce a tiered quota system where B40 citizens receive 50 liters of subsidized RON95 per month.",
         ],
+    )
+    environment_blueprint: Optional[EnvironmentBlueprint] = Field(
+        None,
+        description=(
+            "AI-generated Environment Blueprint (only present when is_feasible=True). "
+            "Contains the 8 Universal Knob initial values and 3–5 Dynamic Sublayers "
+            "representing the concrete physics of the policy."
+        ),
     )
 
 

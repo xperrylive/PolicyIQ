@@ -35,6 +35,7 @@ from backend.schemas import (
     ValidatePolicyResponse,
     SimulateRequest,
     SimulateResponse,
+    EnvironmentBlueprint,
 )
 from backend.ai_engine.orchestrator import (
     Orchestrator,
@@ -105,7 +106,8 @@ async def validate_policy(request: ValidatePolicyRequest) -> ValidatePolicyRespo
     """
     logger.info("Gatekeeper received policy: %.80s…", request.raw_policy_text)
     try:
-        # Use Genkit flow for validation
+        # Use Genkit flow for validation — returns full ValidatePolicyResponse dict
+        # including the EnvironmentBlueprint when is_feasible=True
         result_dict = await validation_flow.run(request.raw_policy_text)
         return ValidatePolicyResponse(**result_dict)
     except Exception as exc:
