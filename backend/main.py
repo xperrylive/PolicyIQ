@@ -92,6 +92,26 @@ async def health() -> dict:
     return {"status": "ok", "service": "policyiq-backend"}
 
 
+@app.get("/test-suggestions", tags=["ops"], summary="Test suggestions feature")
+async def test_suggestions() -> dict:
+    """Test endpoint to verify suggestions are being returned."""
+    from backend.schemas import ValidatePolicyRequest
+    
+    test_request = ValidatePolicyRequest(
+        raw_policy_text="increase taxes on car imports"
+    )
+    
+    result = await _shared_orchestrator.validate_policy(test_request)
+    
+    return {
+        "test": "suggestions_feature",
+        "is_feasible": result.is_feasible,
+        "suggestions_count": len(result.suggestions),
+        "suggestions": result.suggestions,
+        "has_suggestions_field": hasattr(result, 'suggestions'),
+    }
+
+
 # ─── Contract Pre-A → Pre-B ──────────────────────────────────────────────────
 @app.post(
     "/validate-policy",

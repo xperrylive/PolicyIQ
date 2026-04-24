@@ -108,6 +108,8 @@ class SimulationState extends ChangeNotifier {
   void setValidationFailed(String error) {
     validationError = error;
     _status = SimulationStatus.failed;
+    // Note: validationResult should already be set by the caller
+    // so that suggestions and refined_options are available in the UI
     notifyListeners();
   }
 

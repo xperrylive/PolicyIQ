@@ -79,12 +79,14 @@ class ValidatePolicyResponse {
   final bool isValid;
   final String? rejectionReason;
   final List<String> refinedOptions;
+  final List<String> suggestions;
   final EnvironmentBlueprint? environmentBlueprint;
 
   const ValidatePolicyResponse({
     required this.isValid,
     this.rejectionReason,
     this.refinedOptions = const [],
+    this.suggestions = const [],
     this.environmentBlueprint,
   });
 
@@ -94,6 +96,10 @@ class ValidatePolicyResponse {
       isValid: (json['is_feasible'] ?? json['is_valid']) as bool,
       rejectionReason: json['rejection_reason'] as String?,
       refinedOptions: (json['refined_options'] as List<dynamic>?)
+              ?.map((e) => e as String)
+              .toList() ??
+          [],
+      suggestions: (json['suggestions'] as List<dynamic>?)
               ?.map((e) => e as String)
               .toList() ??
           [],

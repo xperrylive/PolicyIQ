@@ -458,21 +458,65 @@ class Orchestrator:
             logger.info("[Multi-Model] Gatekeeper raw response: %s", raw_text[:500])
 
             payload = json.loads(self._clean_json_text(raw_text))
+            
+            logger.info("[DEBUG] Full AI payload keys: %s", list(payload.keys()))
+            logger.info("[DEBUG] AI payload: %s", json.dumps(payload, indent=2)[:1000])
 
             if not isinstance(payload.get("refined_options"), list):
                 payload["refined_options"] = []
 
-            # Enforce exactly 3 refined_options when is_feasible is False
-            if not payload.get("is_feasible", True) and len(payload["refined_options"]) != 3:
-                logger.warning(
-                    "[Multi-Model] Gatekeeper returned %d refined_options (expected 3); normalising.",
-                    len(payload["refined_options"]),
-                )
-                while len(payload["refined_options"]) < 3:
-                    payload["refined_options"].append(
-                        "Please resubmit the policy with a specific RM amount and target demographic."
+            # refined_options are deprecated in favor of suggestions
+            # Keep the field for backward compatibility but don't enforce count
+            if not payload.get("is_feasible", True):
+                payload["refined_options"] = payload.get("refined_options", [])[:3]
+
+            # Extract and validate suggestions (ONLY for rejected policies)
+            suggestions = payload.get("suggestions", [])
+            if not isinstance(suggestions, list):
+                logger.warning("[Gatekeeper] suggestions field is not a list, got: %s", type(suggestions))
+                suggestions = []
+            
+            logger.info(
+                "[Gatekeeper] Extracted suggestions from AI response: %d items",
+                len(suggestions),
+            )
+            
+            # CRITICAL: Only generate suggestions for REJECTED policies
+            is_feasible = payload.get("is_feasible", False)
+            
+            if not is_feasible:
+                # Policy was rejected - ensure we have exactly 3 suggestions
+                if len(suggestions) == 0:
+                    logger.warning(
+                        "[Gatekeeper] AI did not provide suggestions for rejected policy! Generating defaults."
                     )
-                payload["refined_options"] = payload["refined_options"][:3]
+                    suggestions = [
+                        "Specify a concrete RM amount or percentage to make the policy measurable and simulatable.",
+                        "Identify target demographics (B40/M40/T20, Rural/Urban) to enable precise impact modeling.",
+                        "Reference existing Malaysian policy instruments (PADU, BSH, EPF) to ground the proposal in current frameworks.",
+                    ]
+                
+                # Enforce exactly 3 suggestions for rejected policies
+                if len(suggestions) != 3:
+                    logger.warning(
+                        "[Multi-Model] Gatekeeper returned %d suggestions (expected 3); normalising.",
+                        len(suggestions),
+                    )
+                    while len(suggestions) < 3:
+                        suggestions.append(
+                            "Consider targeted B40 subsidies via PADU to reduce fiscal leakage and improve targeting efficiency."
+                        )
+                    suggestions = suggestions[:3]
+            else:
+                # Policy was accepted - no suggestions needed
+                suggestions = []
+                logger.info("[Gatekeeper] Policy accepted - no suggestions generated.")
+            
+            logger.info(
+                "[Gatekeeper] Final suggestions count: %d │ First suggestion: %s",
+                len(suggestions),
+                suggestions[0][:100] if suggestions else "NONE (policy accepted)",
+            )
 
             # Parse EnvironmentBlueprint when feasible
             environment_blueprint = None
@@ -494,6 +538,7 @@ class Orchestrator:
                 is_feasible=payload.get("is_feasible", False),
                 rejection_reason=payload.get("rejection_reason"),
                 refined_options=payload.get("refined_options", []),
+                suggestions=suggestions,
                 environment_blueprint=environment_blueprint,
             )
 
@@ -518,6 +563,11 @@ class Orchestrator:
                     "Please try submitting your policy again.",
                     "Ensure your policy contains a specific RM amount or percentage.",
                     "Make sure your policy targets a specific demographic (e.g. B40, M40, Rural).",
+                ],
+                suggestions=[
+                    "Consider targeted B40 subsidies via PADU instead of universal price caps to reduce fiscal leakage.",
+                    "Explore digital voucher systems to minimize cash transfer fraud and improve targeting efficiency.",
+                    "Evaluate phased implementation over 6 months to allow market adjustment and reduce shock to vulnerable groups.",
                 ],
                 environment_blueprint=None,
             )

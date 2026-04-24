@@ -142,6 +142,15 @@ class ValidatePolicyResponse(BaseModel):
             "Introduce a tiered quota system where B40 citizens receive 50 liters of subsidized RON95 per month.",
         ],
     )
+    suggestions: list[str] = Field(
+        default_factory=list,
+        description="Exactly 3 strategic alternatives or refinement tips grounded in Malaysian socio-economic context.",
+        example=[
+            "Consider adding targeted B40 subsidies instead of universal price caps to reduce fiscal burden.",
+            "Explore digital voucher systems via PADU to minimize leakage and improve targeting efficiency.",
+            "Evaluate phased implementation to allow market adjustment and reduce shock to vulnerable groups.",
+        ],
+    )
     environment_blueprint: Optional[EnvironmentBlueprint] = Field(
         None,
         description=(

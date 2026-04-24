@@ -78,20 +78,17 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
         simState.setValidationSuccess(validation);
         _slideCtrl.forward(from: 0);
       } else {
+        // CRITICAL FIX: Store the validation result BEFORE setting failed status
+        // so that suggestions and refined_options are available in the UI
+        simState.validationResult = validation;
         simState.setValidationFailed(
             validation.rejectionReason ?? 'Policy rejected');
+        _slideCtrl.forward(from: 0);
       }
     } catch (e) {
       if (!mounted) return;
       simState.setValidationFailed('Validation error: $e');
     }
-  }
-
-  void _selectRefinement(String refinedText) {
-    setState(() {
-      _controller.text = refinedText;
-    });
-    _analyzeInput();
   }
 
   void _goToControlPanel() => widget.onNavigate?.call(1);
@@ -371,34 +368,19 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
                   fontFamily: 'SpaceMono',
                   fontSize: 11,
                   color: AppTheme.textSecondary)),
-          if (validation?.refinedOptions.isNotEmpty == true) ...[
+          // REMOVED: refined_options section (redundant with suggestions)
+          // Now only showing the clickable suggestion cards
+          if (validation?.suggestions.isNotEmpty == true) ...[
             const SizedBox(height: 16),
-            const Text('RECOMMENDED OPTIONS:',
-                style: TextStyle(
-                    fontFamily: 'SpaceMono',
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600,
-                    color: AppTheme.textMuted)),
-            const SizedBox(height: 8),
-            ...validation!.refinedOptions.map((option) => Padding(
-                  padding: const EdgeInsets.only(bottom: 6),
-                  child: GestureDetector(
-                    onTap: () => _selectRefinement(option),
-                    child: Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: AppTheme.surfaceElevated,
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: AppTheme.border),
-                      ),
-                      child: Text(option,
-                          style: const TextStyle(
-                              fontFamily: 'SpaceMono',
-                              fontSize: 10,
-                              color: AppTheme.textSecondary)),
-                    ),
-                  ),
-                )),
+            _AdvisorSuggestions(
+              suggestions: validation!.suggestions,
+              onSuggestionTap: (suggestion) {
+                setState(() {
+                  _controller.text = suggestion;
+                });
+                _analyzeInput();
+              },
+            ),
           ],
         ],
       ),
@@ -407,6 +389,7 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
 
   Widget _buildSuccessPanel(SimulationState simState) {
     final blueprint = simState.environmentBlueprint;
+    final validation = simState.validationResult;
 
     return Container(
       padding: const EdgeInsets.all(20),
@@ -476,6 +459,18 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
             ),
             const SizedBox(height: 8),
             ...blueprint.dynamicSublayers.map((sl) => _buildSublayerCard(sl)),
+          ],
+          if (validation?.suggestions.isNotEmpty == true) ...[
+            const SizedBox(height: 20),
+            _AdvisorSuggestions(
+              suggestions: validation!.suggestions,
+              onSuggestionTap: (suggestion) {
+                setState(() {
+                  _controller.text = suggestion;
+                });
+                _analyzeInput();
+              },
+            ),
           ],
           const SizedBox(height: 20),
           SizedBox(
@@ -588,5 +583,188 @@ class _SectionLabel extends StatelessWidget {
             fontWeight: FontWeight.w700,
             color: color ?? AppTheme.textMuted,
             letterSpacing: 1));
+  }
+}
+
+/// _AdvisorSuggestions — Displays strategic alternatives as clickable cards
+class _AdvisorSuggestions extends StatelessWidget {
+  final List<String> suggestions;
+  final void Function(String) onSuggestionTap;
+
+  const _AdvisorSuggestions({
+    required this.suggestions,
+    required this.onSuggestionTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (suggestions.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Row(
+          children: [
+            Icon(Icons.lightbulb_outline, size: 14, color: AppTheme.accentAmber),
+            SizedBox(width: 8),
+            Text('AI STRATEGIC ADVISOR',
+                style: TextStyle(
+                    fontFamily: 'SpaceMono',
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    color: AppTheme.accentAmber,
+                    letterSpacing: 0.8)),
+          ],
+        ),
+        const SizedBox(height: 8),
+        const Text(
+          'Click any suggestion to refine your policy automatically',
+          style: TextStyle(
+              fontFamily: 'SpaceMono',
+              fontSize: 9,
+              color: AppTheme.textMuted,
+              fontStyle: FontStyle.italic),
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          height: 180,  // Increased from 140 to fit longer suggestions
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            itemCount: suggestions.length,
+            itemBuilder: (context, index) {
+              return _SuggestionCard(
+                suggestion: suggestions[index],
+                index: index,
+                onTap: () => onSuggestionTap(suggestions[index]),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// _SuggestionCard — Individual suggestion card with lightbulb icon
+class _SuggestionCard extends StatefulWidget {
+  final String suggestion;
+  final int index;
+  final VoidCallback onTap;
+
+  const _SuggestionCard({
+    required this.suggestion,
+    required this.index,
+    required this.onTap,
+  });
+
+  @override
+  State<_SuggestionCard> createState() => _SuggestionCardState();
+}
+
+class _SuggestionCardState extends State<_SuggestionCard> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          width: 320,  // Increased from 280 to fit longer text
+          margin: const EdgeInsets.only(right: 12),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: _isHovered
+                ? AppTheme.accentAmber.withValues(alpha: 0.08)
+                : AppTheme.surfaceElevated,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: _isHovered
+                  ? AppTheme.accentAmber.withValues(alpha: 0.5)
+                  : AppTheme.border,
+              width: _isHovered ? 2 : 1,
+            ),
+            boxShadow: _isHovered
+                ? [
+                    BoxShadow(
+                      color: AppTheme.accentAmber.withValues(alpha: 0.2),
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    )
+                  ]
+                : null,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 28,
+                    height: 28,
+                    decoration: BoxDecoration(
+                      color: AppTheme.accentAmber.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: const Icon(Icons.lightbulb,
+                        size: 16, color: AppTheme.accentAmber),
+                  ),
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: AppTheme.accentAmber.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                    child: Text('OPTION ${widget.index + 1}',
+                        style: const TextStyle(
+                            fontFamily: 'SpaceMono',
+                            fontSize: 9,
+                            color: AppTheme.accentAmber,
+                            fontWeight: FontWeight.w700)),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Expanded(
+                child: Text(
+                  widget.suggestion,
+                  style: const TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 10,
+                      color: AppTheme.textSecondary,
+                      height: 1.4),
+                  // Removed maxLines and overflow to show full suggestion text
+                  // The card will scroll if needed
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Icon(
+                    Icons.touch_app,
+                    size: 12,
+                    color: _isHovered ? AppTheme.accentAmber : AppTheme.textMuted,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    'Click to apply',
+                    style: TextStyle(
+                        fontFamily: 'SpaceMono',
+                        fontSize: 8,
+                        color:
+                            _isHovered ? AppTheme.accentAmber : AppTheme.textMuted,
+                        fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
