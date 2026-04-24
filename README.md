@@ -177,8 +177,8 @@ cp .env.example .env
 ```bash
 docker-compose up --build
 ```
-API available at: **http://localhost:8000**  
-Interactive docs: **http://localhost:8000/docs**
+API available at: **https://policyiq-backend-v6fp4t7mca-as.a.run.app**  
+Interactive docs: **https://policyiq-backend-v6fp4t7mca-as.a.run.app/docs**
 
 #### 3. Run Frontend (Flutter)
 ```bash
@@ -187,7 +187,7 @@ flutter pub get
 flutter run -d chrome  # or -d windows / -d macos
 ```
 
-The Flutter app will connect to `http://127.0.0.1:8000` by default.
+The Flutter app will connect to `https://policyiq-backend-v6fp4t7mca-as.a.run.app` by default.
 
 ---
 
@@ -425,9 +425,9 @@ cp .env.example .env
 ```dart
 // frontend/lib/services/api_client.dart
 // Ensure baseUrl matches your backend:
-const String _kApiBaseUrl = 'http://127.0.0.1:8000';  // Local
+const String _kApiBaseUrl = 'https://policyiq-backend-v6fp4t7mca-as.a.run.app';  // Production
 // OR
-const String _kApiBaseUrl = 'https://your-cloud-run-url';  // Cloud
+const String _kApiBaseUrl = 'http://127.0.0.1:8000';  // Local development
 ```
 
 ### Groq API rate limits

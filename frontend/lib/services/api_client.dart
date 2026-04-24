@@ -16,9 +16,9 @@ import '../models/contracts.dart';
 
 // DEPLOYMENT NOTE: Update this URL when deploying to Cloud Run
 // Local dev:  'http://127.0.0.1:8000'
-// Cloud Run:  'https://policyiq-backend-<hash>-as.a.run.app'
+// Cloud Run:  'https://policyiq-backend-v6fp4t7mca-as.a.run.app'
 const String _kApiBaseUrl =
-    String.fromEnvironment('API_BASE_URL', defaultValue: 'http://127.0.0.1:8000');
+    String.fromEnvironment('API_BASE_URL', defaultValue: 'https://policyiq-backend-v6fp4t7mca-as.a.run.app');
 
 // ─── ApiClient ────────────────────────────────────────────────────────────────
 

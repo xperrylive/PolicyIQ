@@ -13,17 +13,17 @@ Test any policy (petrol subsidies, cash transfers, tax changes) against 50 AI ci
 
 ## 🚀 Try It Now (Cloud Demo)
 
-**Live API**: `https://policyiq-backend-<hash>-as.a.run.app`
+**Live API**: `https://policyiq-backend-v6fp4t7mca-as.a.run.app`
 
 ### Test the Gatekeeper (Policy Validator)
 ```bash
-curl -X POST https://your-cloud-run-url/validate-policy \
+curl -X POST https://policyiq-backend-v6fp4t7mca-as.a.run.app/validate-policy \
   -H "Content-Type: application/json" \
   -d '{"raw_policy_text": "Remove RON95 subsidy, increase price to RM3.35/litre"}'
 ```
 
 ### Interactive API Docs
-Visit: `https://your-cloud-run-url/docs`
+Visit: `https://policyiq-backend-v6fp4t7mca-as.a.run.app/docs`
 
 ---
 
@@ -50,8 +50,8 @@ docker-compose up --build
 curl http://localhost:8000/health
 ```
 
-**Backend running at**: http://localhost:8000  
-**API docs**: http://localhost:8000/docs
+**Backend running at**: https://policyiq-backend-v6fp4t7mca-as.a.run.app  
+**API docs**: https://policyiq-backend-v6fp4t7mca-as.a.run.app/docs
 
 ---
 
@@ -65,9 +65,9 @@ flutter run -d chrome
 
 **Update API URL** in `frontend/lib/services/api_client.dart`:
 ```dart
-const String _kApiBaseUrl = 'http://127.0.0.1:8000';  // Local
+const String _kApiBaseUrl = 'https://policyiq-backend-v6fp4t7mca-as.a.run.app';  // Production
 // OR
-const String _kApiBaseUrl = 'https://your-cloud-run-url';  // Cloud
+const String _kApiBaseUrl = 'http://127.0.0.1:8000';  // Local development
 ```
 
 ---
@@ -178,7 +178,7 @@ cp .env.example .env
 ### Flutter can't connect
 ```dart
 // Check frontend/lib/services/api_client.dart
-const String _kApiBaseUrl = 'http://127.0.0.1:8000';
+const String _kApiBaseUrl = 'https://policyiq-backend-v6fp4t7mca-as.a.run.app';
 ```
 
 ### Groq rate limits
@@ -228,7 +228,7 @@ const String _kApiBaseUrl = 'http://127.0.0.1:8000';
 
 - **Full README**: [README.md](README.md)
 - **Deployment Guide**: [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)
-- **API Docs**: http://localhost:8000/docs (local) or https://your-cloud-run-url/docs (cloud)
+- **API Docs**: https://policyiq-backend-v6fp4t7mca-as.a.run.app/docs (production) or http://localhost:8000/docs (local)
 - **Groq Console**: https://console.groq.com/
 - **Cloud Run Console**: https://console.cloud.google.com/run
 

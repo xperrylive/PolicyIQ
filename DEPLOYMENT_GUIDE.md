@@ -126,7 +126,7 @@ Open `frontend/lib/services/api_client.dart` and update the base URL:
 const String _kApiBaseUrl = 'http://127.0.0.1:8000';
 
 // AFTER (Cloud Run)
-const String _kApiBaseUrl = 'https://policyiq-backend-abc123-as.a.run.app';
+const String _kApiBaseUrl = 'https://policyiq-backend-v6fp4t7mca-as.a.run.app';
 ```
 
 ### Frontend Configuration

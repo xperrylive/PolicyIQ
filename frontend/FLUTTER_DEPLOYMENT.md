@@ -16,10 +16,10 @@ Open `lib/services/api_client.dart` and update the base URL:
 const String _kApiBaseUrl = 'http://127.0.0.1:8000';
 
 // AFTER (Cloud Run deployment)
-const String _kApiBaseUrl = 'https://policyiq-backend-abc123-as.a.run.app';
+const String _kApiBaseUrl = 'https://policyiq-backend-v6fp4t7mca-as.a.run.app';
 ```
 
-**Important**: Replace `abc123` with your actual Cloud Run service hash.
+**Important**: This URL is now set to the live production backend.
 
 ### Step 2: Verify CORS Configuration
 
