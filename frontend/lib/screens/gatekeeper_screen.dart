@@ -298,9 +298,7 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
                     fontWeight: FontWeight.w600)),
             const Spacer(),
             ElevatedButton(
-              onPressed: _controller.text.isNotEmpty && !isValidating
-                  ? _analyzeInput
-                  : null,
+              onPressed: !isValidating ? _analyzeInput : null,
               style: ElevatedButton.styleFrom(
                 backgroundColor: statusColor,
                 foregroundColor: Colors.white,
