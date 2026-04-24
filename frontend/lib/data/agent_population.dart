@@ -49,9 +49,9 @@ class AgentPopulation {
 
   static IncomeTier _generateIncomeTier(Random random) {
     final roll = random.nextDouble();
-    // Malaysian income distribution: B40 (40%), M40 (40%), T20 (20%)
-    if (roll < 0.4) return IncomeTier.B40;
-    if (roll < 0.8) return IncomeTier.M40;
+    // Malaysian simulation distribution: B40 (50%), M40 (40%), T20 (10%)
+    if (roll < 0.5) return IncomeTier.B40;
+    if (roll < 0.9) return IncomeTier.M40;
     return IncomeTier.T20;
   }
 

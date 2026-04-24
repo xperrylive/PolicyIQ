@@ -154,7 +154,7 @@ class SimulationState extends ChangeNotifier {
   // ── Input state ───────────────────────────────────────────────────────────
   String policyText = '';
   int simulationTicks = 4;
-  int agentCount = 5;
+  int agentCount = 50;
   KnobOverrides knobOverrides = const KnobOverrides();
 
   // ── Validation state ──────────────────────────────────────────────────────
@@ -165,11 +165,19 @@ class SimulationState extends ChangeNotifier {
   /// True once the backend Gatekeeper has approved the policy (is_feasible == true).
   bool get isPolicyApproved => validationResult?.isValid == true;
 
+  /// The EnvironmentBlueprint from the last successful validation.
+  EnvironmentBlueprint? get environmentBlueprint =>
+      validationResult?.environmentBlueprint;
+
   // ── Simulation state ──────────────────────────────────────────────────────
   bool isSimulating = false;
   List<TickSummary> ticks = [];
   SimulateResponse? finalResult;
   String? simulationError;
+
+  /// Reward stability history for the live stress-test chart.
+  /// Each entry is the rewardStabilityScore for that tick (index = tick order).
+  List<double> rewardStabilityHistory = [];
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -190,6 +198,7 @@ class SimulationState extends ChangeNotifier {
       ticks = [];
       finalResult = null;
       simulationError = null;
+      rewardStabilityHistory = [];
     }
     isSimulating = value;
     notifyListeners();
@@ -197,6 +206,7 @@ class SimulationState extends ChangeNotifier {
 
   void addTick(TickSummary tick) {
     ticks = [...ticks, tick];
+    rewardStabilityHistory = [...rewardStabilityHistory, tick.rewardStabilityScore];
     notifyListeners();
   }
 

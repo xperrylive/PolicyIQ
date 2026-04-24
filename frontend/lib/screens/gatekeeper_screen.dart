@@ -2,10 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../theme/app_theme.dart';
 import '../models/contracts.dart';
-import '../models/system_models.dart';
 import '../services/api_client.dart';
 import '../services/decomposition_service.dart';
-
 enum InputValidationState { idle, typing, validating, vague, refined, ready }
 
 class GatekeeperScreen extends StatefulWidget {
@@ -22,7 +20,6 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
   final TextEditingController _controller = TextEditingController();
   final FocusNode _focusNode = FocusNode();
   InputValidationState _state = InputValidationState.idle;
-  String _selectedRefinement = '';
   late AnimationController _pulseCtrl;
   late AnimationController _slideCtrl;
   late Animation<double> _pulseAnim;
@@ -31,7 +28,6 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
   // New policy validation state
   ValidatePolicyResponse? _validationResult;
   DecompositionResult? _decompositionResult;
-  PolicyInput? _currentPolicy;
   bool _isValidating = false;
 
   final List<Map<String, String>> _recentPolicies = [
@@ -109,15 +105,6 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
           _state = InputValidationState.ready;
         });
 
-        _currentPolicy = PolicyInput(
-          id: DateTime.now().millisecondsSinceEpoch.toString(),
-          title: 'User Policy',
-          description: _controller.text,
-          policyText: _controller.text,
-          createdAt: DateTime.now(),
-          validationResults: const {},
-          refinedOptions: validation.refinedOptions,
-        );
       } else {
         setState(() {
           _state = InputValidationState.vague;
@@ -137,7 +124,6 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
 
   void _selectRefinement(String label) {
     setState(() {
-      _selectedRefinement = label;
       _state = InputValidationState.refined;
       _controller.text = label;
     });
@@ -595,6 +581,8 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
   }
 
   Widget _buildSuccessPanel() {
+    final blueprint = _validationResult?.environmentBlueprint;
+
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
@@ -637,15 +625,58 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
               ),
             ],
           ),
-          const SizedBox(height: 16),
-          const Text(
-            'Your policy has been validated by the Gatekeeper AI and decomposed into simulation-ready Sub-Layers. You can now proceed to the Universal Knobs to configure the simulation parameters.',
-            style: TextStyle(
-              fontFamily: 'SpaceMono',
-              fontSize: 12,
-              color: AppTheme.textSecondary,
+
+          // ── EnvironmentBlueprint summary ──────────────────────────────
+          if (blueprint != null) ...[
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppTheme.accentCyan.withOpacity(0.05),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: AppTheme.accentCyan.withOpacity(0.2)),
+              ),
+              child: Text(
+                blueprint.policySummary,
+                style: const TextStyle(
+                  fontFamily: 'SpaceMono',
+                  fontSize: 11,
+                  color: AppTheme.textSecondary,
+                  height: 1.5,
+                ),
+              ),
             ),
-          ),
+            const SizedBox(height: 16),
+            const Row(
+              children: [
+                Icon(Icons.layers, size: 12, color: AppTheme.accentCyan),
+                SizedBox(width: 8),
+                Text(
+                  'ENVIRONMENT SUBLAYERS (AI Physics)',
+                  style: TextStyle(
+                    fontFamily: 'SpaceMono',
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    color: AppTheme.accentCyan,
+                    letterSpacing: 0.8,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ...blueprint.dynamicSublayers.map((sl) => _buildSublayerCard(sl)),
+          ] else ...[
+            const SizedBox(height: 16),
+            const Text(
+              'Your policy has been validated by the Gatekeeper AI and decomposed into simulation-ready Sub-Layers. You can now proceed to the Universal Knobs to configure the simulation parameters.',
+              style: TextStyle(
+                fontFamily: 'SpaceMono',
+                fontSize: 12,
+                color: AppTheme.textSecondary,
+              ),
+            ),
+          ],
+
           const SizedBox(height: 20),
           Row(
             children: [
@@ -692,6 +723,89 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
                       letterSpacing: 1,
                     ),
                   ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSublayerCard(BlueprintSublayer sl) {
+    final impactColor = sl.impactType == 'income'
+        ? AppTheme.accentGreen
+        : sl.impactType == 'expense'
+            ? AppTheme.accentRed
+            : AppTheme.accentAmber;
+
+    final delta = sl.policyValue - sl.baselineValue;
+    final deltaStr =
+        '${delta >= 0 ? '+' : ''}${delta.toStringAsFixed(2)} ${sl.unit}';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppTheme.surfaceElevated,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: AppTheme.border),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 6,
+            height: 40,
+            decoration: BoxDecoration(
+              color: impactColor,
+              borderRadius: BorderRadius.circular(3),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  sl.name,
+                  style: const TextStyle(
+                    fontFamily: 'SpaceMono',
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '↳ ${sl.parentKnob.replaceAll('_', ' ')}',
+                  style: const TextStyle(
+                    fontFamily: 'SpaceMono',
+                    fontSize: 9,
+                    color: AppTheme.textMuted,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
+                deltaStr,
+                style: TextStyle(
+                  fontFamily: 'SpaceMono',
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: impactColor,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                '${sl.baselineValue.toStringAsFixed(2)} → ${sl.policyValue.toStringAsFixed(2)}',
+                style: const TextStyle(
+                  fontFamily: 'SpaceMono',
+                  fontSize: 9,
+                  color: AppTheme.textMuted,
                 ),
               ),
             ],

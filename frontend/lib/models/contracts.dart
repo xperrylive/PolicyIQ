@@ -14,6 +14,63 @@ class ValidatePolicyRequest {
   Map<String, dynamic> toJson() => {'raw_policy_text': rawPolicyText};
 }
 
+// ─── EnvironmentBlueprint (nested in Contract Pre-B) ─────────────────────────
+
+/// A single AI-generated Dynamic Sublayer (3–5 per policy).
+class BlueprintSublayer {
+  final String name;
+  final String parentKnob;
+  final String impactType; // 'expense' | 'multiplier' | 'income'
+  final double baselineValue;
+  final double policyValue;
+  final String unit;
+
+  const BlueprintSublayer({
+    required this.name,
+    required this.parentKnob,
+    required this.impactType,
+    required this.baselineValue,
+    required this.policyValue,
+    required this.unit,
+  });
+
+  factory BlueprintSublayer.fromJson(Map<String, dynamic> json) =>
+      BlueprintSublayer(
+        name: json['name'] as String,
+        parentKnob: json['parent_knob'] as String,
+        impactType: json['impact_type'] as String,
+        baselineValue: (json['baseline_value'] as num).toDouble(),
+        policyValue: (json['policy_value'] as num).toDouble(),
+        unit: json['unit'] as String,
+      );
+
+  /// Formatted delta string, e.g. "+RM0.50" or "-5%"
+  String get deltaLabel {
+    final delta = policyValue - baselineValue;
+    final sign = delta >= 0 ? '+' : '';
+    return '$sign${delta.toStringAsFixed(2)} $unit';
+  }
+}
+
+/// The AI-Driven Environment Blueprint returned when a policy is feasible.
+class EnvironmentBlueprint {
+  final String policySummary;
+  final List<BlueprintSublayer> dynamicSublayers;
+
+  const EnvironmentBlueprint({
+    required this.policySummary,
+    required this.dynamicSublayers,
+  });
+
+  factory EnvironmentBlueprint.fromJson(Map<String, dynamic> json) =>
+      EnvironmentBlueprint(
+        policySummary: json['policy_summary'] as String,
+        dynamicSublayers: (json['dynamic_sublayers'] as List<dynamic>)
+            .map((e) => BlueprintSublayer.fromJson(e as Map<String, dynamic>))
+            .toList(),
+      );
+}
+
 // ─── Contract Pre-B ──────────────────────────────────────────────────────────
 
 /// Contract Pre-B: response from POST /validate-policy
@@ -22,22 +79,26 @@ class ValidatePolicyResponse {
   final bool isValid;
   final String? rejectionReason;
   final List<String> refinedOptions;
+  final EnvironmentBlueprint? environmentBlueprint;
 
   const ValidatePolicyResponse({
     required this.isValid,
     this.rejectionReason,
     this.refinedOptions = const [],
+    this.environmentBlueprint,
   });
 
   factory ValidatePolicyResponse.fromJson(Map<String, dynamic> json) {
+    final bpJson = json['environment_blueprint'] as Map<String, dynamic>?;
     return ValidatePolicyResponse(
-      // Backend returns `is_feasible`; fall back to `is_valid` for safety.
       isValid: (json['is_feasible'] ?? json['is_valid']) as bool,
       rejectionReason: json['rejection_reason'] as String?,
       refinedOptions: (json['refined_options'] as List<dynamic>?)
               ?.map((e) => e as String)
               .toList() ??
           [],
+      environmentBlueprint:
+          bpJson != null ? EnvironmentBlueprint.fromJson(bpJson) : null,
     );
   }
 }
@@ -117,6 +178,8 @@ class AgentDecision {
   final double financialHealthChange;
   final String internalMonologue;
   final bool isBreakingPoint;
+  final double rewardScore;
+  final String demographic;
 
   const AgentDecision({
     required this.agentId,
@@ -125,6 +188,8 @@ class AgentDecision {
     required this.financialHealthChange,
     required this.internalMonologue,
     required this.isBreakingPoint,
+    this.rewardScore = 0.0,
+    this.demographic = '',
   });
 
   factory AgentDecision.fromJson(Map<String, dynamic> json) {
@@ -134,8 +199,10 @@ class AgentDecision {
       sentimentScore: (json['sentiment_score'] as num).toDouble(),
       financialHealthChange:
           (json['financial_health_change'] as num).toDouble(),
-      internalMonologue: json['internal_monologue'] as String,
-      isBreakingPoint: json['is_breaking_point'] as bool,
+      internalMonologue: json['internal_monologue'] as String? ?? '',
+      isBreakingPoint: json['is_breaking_point'] as bool? ?? false,
+      rewardScore: (json['reward_score'] as num?)?.toDouble() ?? 0.0,
+      demographic: json['demographic'] as String? ?? '',
     );
   }
 }
@@ -173,20 +240,52 @@ class TickSummary {
   final int tickId;
   final double averageSentiment;
   final List<AgentDecision> agentActions;
+  // ── MARL/RL enrichment ────────────────────────────────────────────────────
+  /// Average reward score per demographic: {'B40': 0.42, 'M40': 0.61, 'T20': 0.78}
+  final Map<String, double> averageRewardScore;
+  /// Most common action summary per demographic: {'B40': '60% of B40 agents are cutting_expenses'}
+  final Map<String, String> demoActionSummary;
+  /// Overall reward stability score mapped to [0, 100]
+  final double rewardStabilityScore;
 
   const TickSummary({
     required this.tickId,
     required this.averageSentiment,
     required this.agentActions,
+    this.averageRewardScore = const {},
+    this.demoActionSummary = const {},
+    this.rewardStabilityScore = 50.0,
   });
 
-  factory TickSummary.fromJson(Map<String, dynamic> json) => TickSummary(
-        tickId: json['tick_id'] as int,
-        averageSentiment: (json['average_sentiment'] as num).toDouble(),
-        agentActions: (json['agent_actions'] as List<dynamic>)
-            .map((e) => AgentDecision.fromJson(e as Map<String, dynamic>))
-            .toList(),
-      );
+  factory TickSummary.fromJson(Map<String, dynamic> json) {
+    Map<String, double> rewardMap = {};
+    final rawReward = json['average_reward_score'];
+    if (rawReward is Map) {
+      rawReward.forEach((k, v) {
+        rewardMap[k.toString()] = (v as num).toDouble();
+      });
+    }
+
+    Map<String, String> actionMap = {};
+    final rawAction = json['demo_action_summary'];
+    if (rawAction is Map) {
+      rawAction.forEach((k, v) {
+        actionMap[k.toString()] = v.toString();
+      });
+    }
+
+    return TickSummary(
+      tickId: json['tick_id'] as int,
+      averageSentiment: (json['average_sentiment'] as num).toDouble(),
+      agentActions: (json['agent_actions'] as List<dynamic>)
+          .map((e) => AgentDecision.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      averageRewardScore: rewardMap,
+      demoActionSummary: actionMap,
+      rewardStabilityScore:
+          (json['reward_stability_score'] as num?)?.toDouble() ?? 50.0,
+    );
+  }
 }
 
 class Anomaly {
