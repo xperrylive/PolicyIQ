@@ -1335,7 +1335,36 @@ class Orchestrator:
             avg_reward_all = sum(all_rewards) / len(all_rewards) if all_rewards else 0.0
             reward_stability_score = round(max(0.0, min(100.0, (avg_reward_all + 1.0) * 50.0)), 2)
 
+            # ── Macro-Feedback Loop ───────────────────────────────────────────
+            # If >60% of ALL agents are 'cutting_spending', trigger a Recession
+            # Spiral: reduce market_stability and disposable_income_delta by 5%.
+            # Formula: Knob_{t+1} = Knob_t × (1 + macro_delta)
+            all_actions = [d.get("action", "") for d in decisions]
+            cutting_count = sum(
+                1 for a in all_actions
+                if "cut" in a.lower() or "reduc" in a.lower() or "saving" in a.lower()
+            )
+            cutting_ratio = cutting_count / max(len(all_actions), 1)
+            macro_delta = -0.05 if cutting_ratio > 0.60 else 0.0
+
+            if macro_delta != 0.0:
+                logger.warning(
+                    "[MacroFeedback] Recession Spiral │ tick=%d │ cutting_ratio=%.1f%% │ delta=%.2f",
+                    tick_num, cutting_ratio * 100, macro_delta,
+                )
+                # Apply Knob_{t+1} = Knob_t × (1 + macro_delta)
+                ks = self._physics.knob_state
+                ks.market_stability = getattr(ks, "market_stability",
+                    ks.systemic_trust_baseline) * (1.0 + macro_delta)
+                ks.disposable_income_delta = ks.disposable_income_delta * (1.0 + macro_delta)
+                self._physics.knob_state.clamp()
+
             tick_payload = {
+                "macro_feedback": {
+                    "cutting_ratio": round(cutting_ratio, 4),
+                    "macro_delta":   macro_delta,
+                    "recession_spiral_active": macro_delta != 0.0,
+                },
                 "tick_id":                    tick_num,
                 "average_sentiment":          round(avg_sentiment, 4),
                 "agent_actions":              decisions,

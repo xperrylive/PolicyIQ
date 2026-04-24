@@ -4,6 +4,7 @@
 //   - Digital Malaysian Feed: per-demographic agent_actions + avg_reward_score
 //   - Stability Gauge: color-coded by reward_stability_score (0–100)
 //   - Stress Test Line Chart: reward_stability vs time, turns red below 40
+//   - Scenario Comparison: overlay Scenario A vs B stability charts
 
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
@@ -46,6 +47,73 @@ class DashboardScreen extends StatelessWidget {
     }
   }
 
+  void _showSaveScenarioDialog(BuildContext context) {
+    final state = context.read<SimulationState>();
+    final controller = TextEditingController(
+      text: 'Scenario ${state.savedScenarios.length + 1}',
+    );
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        title: const Text('Save Scenario',
+            style: TextStyle(
+                fontFamily: 'SpaceMono',
+                fontSize: 14,
+                color: AppTheme.textPrimary)),
+        content: TextField(
+          controller: controller,
+          style: const TextStyle(
+              fontFamily: 'SpaceMono', fontSize: 12, color: AppTheme.textPrimary),
+          decoration: InputDecoration(
+            hintText: 'e.g. Failed Policy / Refined Policy',
+            hintStyle: const TextStyle(
+                fontFamily: 'SpaceMono', fontSize: 11, color: AppTheme.textMuted),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(6),
+              borderSide: const BorderSide(color: AppTheme.border),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(6),
+              borderSide: const BorderSide(color: AppTheme.accentCyan),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel',
+                style: TextStyle(
+                    fontFamily: 'SpaceMono',
+                    fontSize: 11,
+                    color: AppTheme.textMuted)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppTheme.accentCyan,
+              foregroundColor: Colors.black,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(6)),
+            ),
+            onPressed: () {
+              final label = controller.text.trim();
+              if (label.isNotEmpty) {
+                state.saveCurrentScenario(label);
+              }
+              Navigator.pop(ctx);
+            },
+            child: const Text('SAVE',
+                style: TextStyle(
+                    fontFamily: 'SpaceMono',
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.watch<SimulationState>();
@@ -58,7 +126,7 @@ class DashboardScreen extends StatelessWidget {
           Expanded(
             child: state.ticks.isEmpty && !state.isSimulating
                 ? _buildEmptyState(state)
-                : _buildMainContent(state),
+                : _buildMainContent(context, state),
           ),
         ],
       ),
@@ -111,6 +179,28 @@ class DashboardScreen extends StatelessWidget {
           if (latestStability != null)
             _StabilityGaugeBadge(score: latestStability),
           const SizedBox(width: 12),
+          // ── Save Scenario button (shown when simulation is complete) ────────
+          if (state.finalResult != null && !state.isSimulating) ...[
+            OutlinedButton.icon(
+              onPressed: () => _showSaveScenarioDialog(context),
+              icon: const Icon(Icons.bookmark_add_outlined, size: 14),
+              label: const Text('SAVE SCENARIO',
+                  style: TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.8)),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppTheme.accentCyan,
+                side: const BorderSide(color: AppTheme.accentCyan),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(6)),
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
           if (state.isSimulating)
             const SizedBox(
                 width: 18,
@@ -204,15 +294,23 @@ class DashboardScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildMainContent(SimulationState state) {
+  Widget _buildMainContent(BuildContext context, SimulationState state) {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Stress Test Line Chart ──────────────────────────────────────
+          // ── Scenario Comparison Selector ────────────────────────────────
+          if (state.savedScenarios.isNotEmpty) ...[
+            _ScenarioComparisonBar(state: state),
+            const SizedBox(height: 16),
+          ],
+          // ── Stress Test Line Chart (with optional overlay) ──────────────
           if (state.rewardStabilityHistory.isNotEmpty) ...[
-            _StressTestChart(history: state.rewardStabilityHistory),
+            _StressTestChart(
+              history: state.rewardStabilityHistory,
+              comparisonScenario: state.comparisonScenario,
+            ),
             const SizedBox(height: 20),
           ],
           // ── Digital Malaysian Feed (latest tick) ────────────────────────
@@ -230,6 +328,124 @@ class DashboardScreen extends StatelessWidget {
             _RecommendationCard(
                 text: state.finalResult!.aiPolicyRecommendation),
         ],
+      ),
+    );
+  }
+}
+
+// ─── Scenario Comparison Bar ──────────────────────────────────────────────────
+
+class _ScenarioComparisonBar extends StatelessWidget {
+  final SimulationState state;
+
+  const _ScenarioComparisonBar({required this.state});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppTheme.accentPurple.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppTheme.accentPurple.withValues(alpha: 0.25)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.compare_arrows_rounded,
+              size: 14, color: AppTheme.accentPurple),
+          const SizedBox(width: 8),
+          const Text('COMPARE WITH:',
+              style: TextStyle(
+                  fontFamily: 'SpaceMono',
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color: AppTheme.accentPurple)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  // "None" chip
+                  _ScenarioChip(
+                    label: 'None',
+                    isSelected: state.comparisonScenarioId == null,
+                    color: AppTheme.textMuted,
+                    onTap: () => state.setComparisonScenario(null),
+                  ),
+                  const SizedBox(width: 6),
+                  ...state.savedScenarios.map((s) => Padding(
+                        padding: const EdgeInsets.only(right: 6),
+                        child: _ScenarioChip(
+                          label: s.label,
+                          isSelected: state.comparisonScenarioId == s.id,
+                          color: AppTheme.accentCyan,
+                          onTap: () => state.setComparisonScenario(s.id),
+                        ),
+                      )),
+                ],
+              ),
+            ),
+          ),
+          // Refine & Re-run button (shown when a scenario is selected)
+          if (state.comparisonScenario != null) ...[
+            const SizedBox(width: 8),
+            TextButton.icon(
+              onPressed: () =>
+                  state.refineFromScenario(state.comparisonScenario!),
+              icon: const Icon(Icons.edit_note_rounded, size: 14),
+              label: const Text('REFINE & RE-RUN',
+                  style: TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 9,
+                      fontWeight: FontWeight.w700)),
+              style: TextButton.styleFrom(
+                foregroundColor: AppTheme.accentAmber,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ScenarioChip extends StatelessWidget {
+  final String label;
+  final bool isSelected;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _ScenarioChip({
+    required this.label,
+    required this.isSelected,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: isSelected ? color.withValues(alpha: 0.15) : Colors.transparent,
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(
+              color: isSelected
+                  ? color.withValues(alpha: 0.6)
+                  : AppTheme.border),
+        ),
+        child: Text(label,
+            style: TextStyle(
+                fontFamily: 'SpaceMono',
+                fontSize: 10,
+                fontWeight:
+                    isSelected ? FontWeight.w700 : FontWeight.normal,
+                color: isSelected ? color : AppTheme.textMuted)),
       ),
     );
   }
@@ -488,9 +704,13 @@ class _RewardBar extends StatelessWidget {
 // ─── Stress Test Line Chart ───────────────────────────────────────────────────
 
 class _StressTestChart extends StatelessWidget {
-  final List<double> history; // reward_stability_score per tick
+  final List<double> history; // reward_stability_score per tick (current run)
+  final SavedScenario? comparisonScenario; // optional overlay
 
-  const _StressTestChart({required this.history});
+  const _StressTestChart({
+    required this.history,
+    this.comparisonScenario,
+  });
 
   bool get _isInFailure => history.isNotEmpty && history.last < 40;
 
@@ -521,6 +741,16 @@ class _StressTestChart extends StatelessWidget {
                 color: borderColor,
               ),
               const Spacer(),
+              // Comparison legend
+              if (comparisonScenario != null) ...[
+                _LegendDot(
+                    color: AppTheme.accentCyan, label: 'Current'),
+                const SizedBox(width: 10),
+                _LegendDot(
+                    color: AppTheme.accentAmber,
+                    label: comparisonScenario!.label),
+                const SizedBox(width: 10),
+              ],
               if (_isInFailure)
                 Container(
                   padding: const EdgeInsets.symmetric(
@@ -544,7 +774,10 @@ class _StressTestChart extends StatelessWidget {
           SizedBox(
             height: 120,
             child: CustomPaint(
-              painter: _StabilityLinePainter(history: history),
+              painter: _StabilityLinePainter(
+                history: history,
+                comparisonHistory: comparisonScenario?.stabilityHistory,
+              ),
               size: Size.infinite,
             ),
           ),
@@ -568,10 +801,41 @@ class _StressTestChart extends StatelessWidget {
   }
 }
 
+class _LegendDot extends StatelessWidget {
+  final Color color;
+  final String label;
+
+  const _LegendDot({required this.color, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 4),
+        Text(label,
+            style: TextStyle(
+                fontFamily: 'SpaceMono',
+                fontSize: 9,
+                color: color)),
+      ],
+    );
+  }
+}
+
 class _StabilityLinePainter extends CustomPainter {
   final List<double> history;
+  final List<double>? comparisonHistory; // optional overlay (Scenario B)
 
-  const _StabilityLinePainter({required this.history});
+  const _StabilityLinePainter({
+    required this.history,
+    this.comparisonHistory,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -602,75 +866,133 @@ class _StabilityLinePainter extends CustomPainter {
     )..layout();
     tp.paint(canvas, Offset(2, thresholdY - 10));
 
-    // Draw fill area
-    final fillPath = Path();
-    final n = history.length;
+    // ── Draw comparison overlay (Scenario B) first so it sits behind ─────────
+    if (comparisonHistory != null && comparisonHistory!.isNotEmpty) {
+      _drawLine(
+        canvas: canvas,
+        size: size,
+        data: comparisonHistory!,
+        color: AppTheme.accentAmber,
+        dashed: true,
+        drawFill: false,
+        drawLabels: false,
+      );
+    }
+
+    // ── Draw current run (Scenario A / active) ────────────────────────────────
+    _drawLine(
+      canvas: canvas,
+      size: size,
+      data: history,
+      color: lineColor,
+      dashed: false,
+      drawFill: true,
+      drawLabels: true,
+    );
+  }
+
+  void _drawLine({
+    required Canvas canvas,
+    required Size size,
+    required List<double> data,
+    required Color color,
+    required bool dashed,
+    required bool drawFill,
+    required bool drawLabels,
+  }) {
+    final n = data.length;
     final xStep = n > 1 ? size.width / (n - 1) : size.width;
 
-    fillPath.moveTo(0, size.height);
-    for (int i = 0; i < n; i++) {
-      final x = i * xStep;
-      final y = size.height - (history[i] / 100) * size.height;
-      fillPath.lineTo(x, y);
+    if (drawFill) {
+      final fillPath = Path();
+      fillPath.moveTo(0, size.height);
+      for (int i = 0; i < n; i++) {
+        final x = i * xStep;
+        final y = size.height - (data[i] / 100) * size.height;
+        fillPath.lineTo(x, y);
+      }
+      fillPath.lineTo((n - 1) * xStep, size.height);
+      fillPath.close();
+      canvas.drawPath(
+        fillPath,
+        Paint()
+          ..color = color.withValues(alpha: 0.08)
+          ..style = PaintingStyle.fill,
+      );
     }
-    fillPath.lineTo((n - 1) * xStep, size.height);
-    fillPath.close();
 
-    canvas.drawPath(
-      fillPath,
-      Paint()
-        ..color = lineColor.withValues(alpha: 0.08)
-        ..style = PaintingStyle.fill,
-    );
-
-    // Draw line
-    final linePaint = Paint()
-      ..color = lineColor
-      ..strokeWidth = 2
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round;
-
+    // Build line path
     final linePath = Path();
     for (int i = 0; i < n; i++) {
       final x = i * xStep;
-      final y = size.height - (history[i] / 100) * size.height;
+      final y = size.height - (data[i] / 100) * size.height;
       if (i == 0) {
         linePath.moveTo(x, y);
       } else {
         linePath.lineTo(x, y);
       }
     }
-    canvas.drawPath(linePath, linePaint);
 
-    // Draw dots
+    final linePaint = Paint()
+      ..color = color
+      ..strokeWidth = dashed ? 1.5 : 2
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    if (dashed) {
+      // Draw dashed line manually
+      final pathMetrics = linePath.computeMetrics();
+      for (final metric in pathMetrics) {
+        double distance = 0;
+        const dashLen = 6.0;
+        const gapLen = 4.0;
+        bool drawing = true;
+        while (distance < metric.length) {
+          final next = math.min(
+              distance + (drawing ? dashLen : gapLen), metric.length);
+          if (drawing) {
+            canvas.drawPath(
+              metric.extractPath(distance, next),
+              linePaint,
+            );
+          }
+          distance = next;
+          drawing = !drawing;
+        }
+      }
+    } else {
+      canvas.drawPath(linePath, linePaint);
+    }
+
+    // Draw dots + labels
     final dotPaint = Paint()
-      ..color = lineColor
+      ..color = color
       ..style = PaintingStyle.fill;
     for (int i = 0; i < n; i++) {
       final x = i * xStep;
-      final y = size.height - (history[i] / 100) * size.height;
-      canvas.drawCircle(Offset(x, y), 4, dotPaint);
-      // Score label above dot
-      final label = TextPainter(
-        text: TextSpan(
-          text: history[i].toStringAsFixed(0),
-          style: TextStyle(
-              fontFamily: 'SpaceMono',
-              fontSize: 8,
-              fontWeight: FontWeight.w700,
-              color: lineColor),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      label.paint(canvas,
-          Offset(x - label.width / 2, math.max(0, y - 16)));
+      final y = size.height - (data[i] / 100) * size.height;
+      canvas.drawCircle(Offset(x, y), dashed ? 3 : 4, dotPaint);
+      if (drawLabels) {
+        final label = TextPainter(
+          text: TextSpan(
+            text: data[i].toStringAsFixed(0),
+            style: TextStyle(
+                fontFamily: 'SpaceMono',
+                fontSize: 8,
+                fontWeight: FontWeight.w700,
+                color: color),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        label.paint(canvas, Offset(x - label.width / 2, math.max(0, y - 16)));
+      }
     }
   }
 
   @override
   bool shouldRepaint(_StabilityLinePainter old) =>
-      old.history != history;
+      old.history != history || old.comparisonHistory != comparisonHistory;
 }
 
 // ─── Macro Summary Card ───────────────────────────────────────────────────────

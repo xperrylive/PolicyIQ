@@ -120,6 +120,19 @@ class ApiClient {
   }
 
   void dispose() => _httpClient.close();
+
+  // ── GET /export-report/{simulation_id} ────────────────────────────────────
+
+  /// Fetches the text-based pitch-ready report for a completed simulation.
+  Future<String> exportReport(String simulationId) async {
+    final uri = Uri.parse('$baseUrl/export-report/$simulationId');
+    final response = await _httpClient.get(uri);
+    if (response.statusCode == 200) {
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      return body['report'] as String? ?? response.body;
+    }
+    throw ApiException(response.statusCode, response.body);
+  }
 }
 
 // ─── SSE Event ────────────────────────────────────────────────────────────────
@@ -144,6 +157,27 @@ class ApiException implements Exception {
 
   @override
   String toString() => 'ApiException($statusCode): $message';
+}
+
+// ─── SavedScenario ────────────────────────────────────────────────────────────
+
+/// A snapshot of a completed simulation run, stored for side-by-side comparison.
+class SavedScenario {
+  final String id;
+  final String label;
+  final String policyText;
+  final List<double> stabilityHistory;
+  final SimulateResponse result;
+  final DateTime savedAt;
+
+  const SavedScenario({
+    required this.id,
+    required this.label,
+    required this.policyText,
+    required this.stabilityHistory,
+    required this.result,
+    required this.savedAt,
+  });
 }
 
 // ─── SimulationState (ChangeNotifier / Provider) ─────────────────────────────
@@ -178,6 +212,54 @@ class SimulationState extends ChangeNotifier {
   /// Reward stability history for the live stress-test chart.
   /// Each entry is the rewardStabilityScore for that tick (index = tick order).
   List<double> rewardStabilityHistory = [];
+
+  // ── Scenario Versioning ───────────────────────────────────────────────────
+
+  /// All saved scenarios for side-by-side comparison.
+  List<SavedScenario> savedScenarios = [];
+
+  /// Which scenario slot is currently overlaid on the chart (null = none).
+  String? comparisonScenarioId;
+
+  /// Returns the scenario currently selected for comparison, if any.
+  SavedScenario? get comparisonScenario => savedScenarios
+      .where((s) => s.id == comparisonScenarioId)
+      .firstOrNull;
+
+  /// Saves the current completed simulation as a named scenario.
+  /// Returns the saved scenario, or null if no final result exists.
+  SavedScenario? saveCurrentScenario(String label) {
+    if (finalResult == null) return null;
+    final scenario = SavedScenario(
+      id: 'scenario_${DateTime.now().millisecondsSinceEpoch}',
+      label: label,
+      policyText: policyText,
+      stabilityHistory: List.unmodifiable(rewardStabilityHistory),
+      result: finalResult!,
+      savedAt: DateTime.now(),
+    );
+    savedScenarios = [...savedScenarios, scenario];
+    notifyListeners();
+    return scenario;
+  }
+
+  /// Loads a saved scenario's policy text for refinement, keeping saved
+  /// scenarios intact so the user can compare after re-running.
+  void refineFromScenario(SavedScenario scenario) {
+    policyText = scenario.policyText;
+    // Clear current run so the user starts fresh
+    ticks = [];
+    finalResult = null;
+    simulationError = null;
+    rewardStabilityHistory = [];
+    notifyListeners();
+  }
+
+  /// Sets the scenario to overlay on the Stability Chart.
+  void setComparisonScenario(String? scenarioId) {
+    comparisonScenarioId = scenarioId;
+    notifyListeners();
+  }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 

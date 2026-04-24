@@ -2,9 +2,10 @@
 main.py — PolicyIQ FastAPI Application Entrypoint.
 
 Endpoints:
-  POST /validate-policy  → Gatekeeper validation (Contract Pre-A → Pre-B)
-  POST /simulate         → Full simulation as an SSE stream (Contract A → E)
-  GET  /health           → Docker/GCP healthcheck probe
+  POST /validate-policy              → Gatekeeper validation (Contract Pre-A → Pre-B)
+  POST /simulate                     → Full simulation as an SSE stream (Contract A → E)
+  GET  /export-report/{simulation_id} → Pitch-ready text report for a completed simulation
+  GET  /health                       → Docker/GCP healthcheck probe
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import sys, os; sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import json
 import logging
+import uuid
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -78,6 +80,10 @@ app.add_middleware(
 # corruption under concurrent requests.
 _shared_orchestrator = Orchestrator()
 
+# ─── In-memory simulation store ──────────────────────────────────────────────
+# Maps simulation_id → completed SimulateResponse dict (last 20 runs kept).
+_simulation_store: dict[str, dict] = {}
+
 
 # ─── Health ──────────────────────────────────────────────────────────────────
 @app.get("/health", tags=["ops"], summary="Liveness probe")
@@ -142,6 +148,7 @@ async def simulate(request: SimulateRequest) -> EventSourceResponse:
 
     # Fresh Orchestrator per request is now handled inside simulation_flow.
     # No shared state needed here.
+    simulation_id = str(uuid.uuid4())
 
     async def event_generator() -> AsyncGenerator[dict, None]:
         import asyncio
@@ -159,6 +166,23 @@ async def simulate(request: SimulateRequest) -> EventSourceResponse:
                 if "error" in result:
                     # simulation_flow already pushed an error event; just close.
                     return
+
+                # Store completed result for /export-report
+                _simulation_store[simulation_id] = {
+                    "policy_text":     request.policy_text,
+                    "final_response":  result.get("final_response_json", "{}"),
+                    "summary":         result.get("summary", ""),
+                }
+                # Evict oldest entries beyond 20
+                if len(_simulation_store) > 20:
+                    oldest = next(iter(_simulation_store))
+                    del _simulation_store[oldest]
+
+                # Push the simulation_id so the client can reference it
+                await queue.put({
+                    "event": "simulation_id",
+                    "data":  json.dumps({"simulation_id": simulation_id}),
+                })
 
                 # Push the Chief Economist summary as a dedicated event.
                 await queue.put({
@@ -197,3 +221,121 @@ if __name__ == "__main__":
     # Using string import to avoid issues with reload and full module paths
     uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)
 
+
+# ─── GET /export-report/{simulation_id} ──────────────────────────────────────
+@app.get(
+    "/export-report/{simulation_id}",
+    tags=["simulation"],
+    summary="Generate a pitch-ready text report for a completed simulation",
+)
+async def export_report(simulation_id: str) -> dict:
+    """
+    **The Pitch-Ready Report.**
+
+    Returns a structured text summary of a completed simulation including:
+    - Environment Blueprint (policy summary + knob state)
+    - Final Reward Stability Score
+    - Most critical agent monologues ('Voice of the People')
+    """
+    stored = _simulation_store.get(simulation_id)
+    if not stored:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Simulation '{simulation_id}' not found. Run a simulation first.",
+        )
+
+    policy_text = stored.get("policy_text", "")
+    summary_text = stored.get("summary", "")
+
+    try:
+        final_data = json.loads(stored.get("final_response", "{}"))
+    except json.JSONDecodeError:
+        final_data = {}
+
+    # ── Extract key data ──────────────────────────────────────────────────────
+    metadata   = final_data.get("simulation_metadata", {})
+    macro      = final_data.get("macro_summary", {})
+    timeline   = final_data.get("timeline", [])
+    anomalies  = final_data.get("anomalies", [])
+
+    # Final stability score = last tick's reward_stability_score
+    final_stability = 0.0
+    if timeline:
+        final_stability = timeline[-1].get("reward_stability_score", 0.0)
+
+    # Voice of the People: top 5 most critical monologues (lowest sentiment)
+    all_monologues: list[dict] = []
+    for tick in timeline:
+        for action in tick.get("agent_actions", []):
+            monologue = action.get("internal_monologue", "").strip()
+            if monologue:
+                all_monologues.append({
+                    "tick":              tick.get("tick_id", 0),
+                    "agent_id":          action.get("agent_id", ""),
+                    "sentiment":         action.get("sentiment_score", 0.0),
+                    "monologue":         monologue,
+                    "is_breaking_point": action.get("is_breaking_point", False),
+                })
+
+    # Sort by sentiment ascending (most distressed first), take top 5
+    critical_voices = sorted(all_monologues, key=lambda x: x["sentiment"])[:5]
+
+    # ── Build report text ─────────────────────────────────────────────────────
+    stability_label = (
+        "STABLE" if final_stability >= 70
+        else "MODERATE" if final_stability >= 40
+        else "POLICY FAILURE / SOCIAL UNREST"
+    )
+
+    lines = [
+        "=" * 60,
+        "  POLICYIQ — SIMULATION REPORT",
+        f"  Simulation ID: {simulation_id}",
+        "=" * 60,
+        "",
+        "── ENVIRONMENT BLUEPRINT ──────────────────────────────────",
+        f"Policy: {policy_text[:200]}{'...' if len(policy_text) > 200 else ''}",
+        f"Summary: {metadata.get('policy', summary_text)[:300]}",
+        f"Total Ticks: {metadata.get('total_ticks', len(timeline))}",
+        "",
+        "── FINAL REWARD STABILITY SCORE ───────────────────────────",
+        f"Score: {final_stability:.1f} / 100  [{stability_label}]",
+        f"Overall Sentiment Shift: {macro.get('overall_sentiment_shift', 0.0):+.4f}",
+        f"Inequality Delta: {macro.get('inequality_delta', 0.0):+.4f}",
+        f"Breaking Points (Anomalies): {len(anomalies)}",
+        "",
+        "── VOICE OF THE PEOPLE (Most Critical Monologues) ─────────",
+    ]
+
+    if critical_voices:
+        for i, v in enumerate(critical_voices, 1):
+            bp_tag = " ⚠ BREAKING POINT" if v["is_breaking_point"] else ""
+            lines += [
+                "",
+                f"[{i}] Tick {v['tick']} | Agent {v['agent_id']} | "
+                f"Sentiment {v['sentiment']:+.3f}{bp_tag}",
+                f"    \"{v['monologue'][:300]}\"",
+            ]
+    else:
+        lines.append("  No agent monologues recorded.")
+
+    lines += [
+        "",
+        "── AI POLICY RECOMMENDATION ───────────────────────────────",
+        final_data.get("ai_policy_recommendation", summary_text or "N/A"),
+        "",
+        "=" * 60,
+    ]
+
+    report = "\n".join(lines)
+    logger.info(
+        "Export report generated │ simulation_id=%s │ stability=%.1f",
+        simulation_id, final_stability,
+    )
+
+    return {
+        "simulation_id":   simulation_id,
+        "final_stability": final_stability,
+        "stability_label": stability_label,
+        "report":          report,
+    }
