@@ -82,6 +82,18 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    // Sync simulation parameters with state when entering this screen
+    final simState = context.read<SimulationState>();
+    
+    // Debug: Print current values before sync
+    debugPrint('[CONTROL_PANEL] Before sync - _simTicks: $_simTicks, state.simulationTicks: ${simState.simulationTicks}');
+    
+    _simTicks = simState.simulationTicks;
+    _agentCount = simState.agentCount;
+    
+    // Debug: Print values after sync
+    debugPrint('[CONTROL_PANEL] After sync - _simTicks: $_simTicks, state.simulationTicks: ${simState.simulationTicks}');
+    
     // Sync knobs with blueprint values when entering this screen
     _syncKnobsWithBlueprint();
   }
@@ -519,7 +531,7 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
                         displayValue: '$_simTicks',
                         onChanged: (v) {
                           setState(() => _simTicks = v.round());
-                          simState.simulationTicks = v.round();
+                          simState.updateSimulationParameters(ticks: v.round());
                         },
                       ),
                       const SizedBox(height: 12),
@@ -533,7 +545,7 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
                         displayValue: '$_agentCount',
                         onChanged: (v) {
                           setState(() => _agentCount = v.round());
-                          simState.agentCount = v.round();
+                          simState.updateSimulationParameters(agents: v.round());
                         },
                       ),
                     ],
@@ -947,6 +959,22 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
       knobOverrides: _overrideActive ? overrides : const KnobOverrides(),
     );
 
+    // Ensure state is synchronized before starting simulation
+    simState.updateSimulationParameters(ticks: _simTicks, agents: _agentCount);
+    
+    // Debug: Print the values being used
+    debugPrint('[CONTROL_PANEL] Starting simulation with $_simTicks ticks, $_agentCount agents');
+    debugPrint('[CONTROL_PANEL] State simulationTicks: ${simState.simulationTicks}');
+    debugPrint('[CONTROL_PANEL] Request simulationTicks: ${request.simulationTicks}');
+    
+    // Double-check that the state was updated correctly
+    if (simState.simulationTicks != _simTicks) {
+      debugPrint('[CONTROL_PANEL] WARNING: State sync failed! Expected $_simTicks, got ${simState.simulationTicks}');
+      // Force update the state directly as a fallback
+      simState.simulationTicks = _simTicks;
+      simState.agentCount = _agentCount;
+    }
+    
     simState.setSimulating();
 
     apiClient.simulateStream(request).listen(

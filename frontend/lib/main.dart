@@ -64,7 +64,6 @@ class _AppShellState extends State<AppShell> with TickerProviderStateMixin {
   int _currentIndex = 0;
   late AnimationController _bootCtrl;
   late Animation<double> _bootAnim;
-  bool _booted = false;
   DateTime _currentTime = DateTime.now();
   late Timer _timeTimer;
   final List<_NavItem> _navItems = [
@@ -107,7 +106,52 @@ class _AppShellState extends State<AppShell> with TickerProviderStateMixin {
   ];
   void _navigateTo(int index) {
     if (index < 0 || index >= _navItems.length) return;
-    setState(() => _currentIndex = index);
+    
+    // State-locked navigation logic
+    final state = context.read<SimulationState>();
+    
+    // Page 0 (Gatekeeper): Always enabled
+    if (index == 0) {
+      setState(() => _currentIndex = index);
+      return;
+    }
+    
+    // Page 1 (Dashboard): Only enabled if status is readyToReview, simulating, or completed
+    if (index == 1) {
+      if (state.status == SimulationStatus.readyToReview ||
+          state.status == SimulationStatus.simulating ||
+          state.status == SimulationStatus.completed) {
+        setState(() => _currentIndex = index);
+      }
+      return;
+    }
+    
+    // Page 2 (Control Panel): Only enabled if status is readyToReview, simulating, or completed
+    if (index == 2) {
+      if (state.status == SimulationStatus.readyToReview ||
+          state.status == SimulationStatus.simulating ||
+          state.status == SimulationStatus.completed) {
+        setState(() => _currentIndex = index);
+      }
+      return;
+    }
+    
+    // Page 3 (Macro Analytics): Only enabled if status is completed
+    if (index == 3) {
+      if (state.status == SimulationStatus.completed) {
+        setState(() => _currentIndex = index);
+      }
+      return;
+    }
+    
+    // Other pages (Micro Insights, Anomaly Dashboard): Only enabled if status is simulating or completed
+    if (index == 4 || index == 5) {
+      if (state.status == SimulationStatus.simulating ||
+          state.status == SimulationStatus.completed) {
+        setState(() => _currentIndex = index);
+      }
+      return;
+    }
   }
 
   @override
@@ -127,7 +171,7 @@ class _AppShellState extends State<AppShell> with TickerProviderStateMixin {
     });
     
     Future.delayed(const Duration(milliseconds: 300), () {
-      _bootCtrl.forward().then((_) => setState(() => _booted = true));
+      _bootCtrl.forward();
     });
   }
 
@@ -142,7 +186,7 @@ class _AppShellState extends State<AppShell> with TickerProviderStateMixin {
   Widget build(BuildContext context) {
     final screens = <Widget>[
       GatekeeperScreen(onNavigate: _navigateTo),
-      const DashboardScreen(),
+      DashboardScreen(onNavigate: _navigateTo),
       ControlPanelScreen(onNavigate: _navigateTo),
       const MacroAnalyticsScreen(),
       const MicroInsightsScreen(),
@@ -325,12 +369,44 @@ class _AppShellState extends State<AppShell> with TickerProviderStateMixin {
   Widget _buildNavButton(int index) {
     final item = _navItems[index];
     final isActive = _currentIndex == index;
+    
+    // Check if this navigation item should be enabled based on simulation state
+    final state = context.watch<SimulationState>();
+    bool isEnabled = true;
+    
+    // Page 0 (Gatekeeper): Always enabled
+    if (index == 0) {
+      isEnabled = true;
+    }
+    // Page 1 (Dashboard): Only enabled if status is readyToReview, simulating, or completed
+    else if (index == 1) {
+      isEnabled = state.status == SimulationStatus.readyToReview ||
+                  state.status == SimulationStatus.simulating ||
+                  state.status == SimulationStatus.completed;
+    }
+    // Page 2 (Control Panel): Only enabled if status is readyToReview, simulating, or completed
+    else if (index == 2) {
+      isEnabled = state.status == SimulationStatus.readyToReview ||
+                  state.status == SimulationStatus.simulating ||
+                  state.status == SimulationStatus.completed;
+    }
+    // Page 3 (Macro Analytics): Only enabled if status is completed
+    else if (index == 3) {
+      isEnabled = state.status == SimulationStatus.completed;
+    }
+    // Other pages (Micro Insights, Anomaly Dashboard): Only enabled if status is simulating or completed
+    else if (index == 4 || index == 5) {
+      isEnabled = state.status == SimulationStatus.simulating ||
+                  state.status == SimulationStatus.completed;
+    }
 
     return Tooltip(
-      message: '${item.label}\n${item.sublabel}',
+      message: isEnabled 
+          ? '${item.label}\n${item.sublabel}'
+          : '${item.label}\n${item.sublabel}\n🔒 Complete previous steps first',
       preferBelow: false,
       child: GestureDetector(
-        onTap: () => _navigateTo(index),
+        onTap: isEnabled ? () => _navigateTo(index) : null,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 200),
           width: 45,
@@ -348,10 +424,27 @@ class _AppShellState extends State<AppShell> with TickerProviderStateMixin {
               width: isActive ? 1.5 : 1,
             ),
           ),
-          child: Icon(
-            item.icon,
-            size: 20,
-            color: isActive ? item.accentColor : AppTheme.textMuted,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              Icon(
+                item.icon,
+                size: 20,
+                color: isEnabled 
+                    ? (isActive ? item.accentColor : AppTheme.textMuted)
+                    : AppTheme.textMuted.withOpacity(0.3),
+              ),
+              if (!isEnabled)
+                Positioned(
+                  top: 2,
+                  right: 2,
+                  child: Icon(
+                    Icons.lock,
+                    size: 12,
+                    color: AppTheme.textMuted.withOpacity(0.6),
+                  ),
+                ),
+            ],
           ),
         ),
       ),

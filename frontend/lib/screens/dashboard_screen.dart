@@ -16,7 +16,9 @@ import '../models/contracts.dart';
 import '../theme/app_theme.dart';
 
 class DashboardScreen extends StatelessWidget {
-  const DashboardScreen({super.key});
+  final Function(int)? onNavigate;
+  
+  const DashboardScreen({super.key, this.onNavigate});
 
   void _showSaveScenarioDialog(BuildContext context) {
     final state = context.read<SimulationState>();
@@ -110,6 +112,11 @@ class DashboardScreen extends StatelessWidget {
         ? state.rewardStabilityHistory.last
         : null;
 
+    // Debug: Print simulation parameters
+    if (state.status == SimulationStatus.simulating) {
+      debugPrint('[DASHBOARD] Simulating - ticks: ${state.ticks.length}/${state.simulationTicks}');
+    }
+
     return Container(
       padding: const EdgeInsets.fromLTRB(24, 16, 24, 12),
       decoration: const BoxDecoration(
@@ -194,6 +201,27 @@ class DashboardScreen extends StatelessWidget {
                 _LiveStabilityScore(score: latestStability),
               const SizedBox(width: 12),
               if (state.status == SimulationStatus.completed) ...[
+                ElevatedButton.icon(
+                  onPressed: () {
+                    // Navigate to Macro Analytics page (index 3)
+                    onNavigate?.call(3);
+                  },
+                  icon: const Icon(Icons.analytics, size: 16),
+                  label: const Text('GENERATE FINAL REPORT',
+                      style: TextStyle(
+                          fontFamily: 'SpaceMono',
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.8)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppTheme.accentGreen,
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(6)),
+                  ),
+                ),
+                const SizedBox(width: 12),
                 OutlinedButton.icon(
                   onPressed: () => _showSaveScenarioDialog(context),
                   icon: const Icon(Icons.bookmark_add_outlined, size: 14),
@@ -222,14 +250,14 @@ class DashboardScreen extends StatelessWidget {
                         child: CircularProgressIndicator(
                             strokeWidth: 2, color: AppTheme.accentCyan)),
                     const SizedBox(width: 8),
-                    Text(
-                      'SIMULATING ${state.ticks.length}/${state.simulationTicks}',
-                      style: const TextStyle(
-                          fontFamily: 'SpaceMono',
-                          fontSize: 10,
-                          fontWeight: FontWeight.w600,
-                          color: AppTheme.accentCyan),
-                    ),
+                      Text(
+                        'SIMULATING ${state.ticks.length}/${state.simulationTicks}',
+                        style: const TextStyle(
+                            fontFamily: 'SpaceMono',
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                            color: AppTheme.accentCyan),
+                      ),
                   ],
                 ),
               if (state.status == SimulationStatus.idle ||

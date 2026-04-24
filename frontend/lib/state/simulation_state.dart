@@ -210,6 +210,9 @@ class SimulationState extends ChangeNotifier {
     // Clear any comparison scenario to avoid confusion
     comparisonScenarioId = null;
     
+    // Debug: Print current simulationTicks value
+    print('[SIMULATION_STATE] Starting simulation with $simulationTicks ticks');
+    
     notifyListeners();
   }
 
@@ -287,6 +290,12 @@ class SimulationState extends ChangeNotifier {
 
   void updateKnobOverrides(KnobOverrides overrides) {
     knobOverrides = overrides;
+    notifyListeners();
+  }
+
+  void updateSimulationParameters({int? ticks, int? agents}) {
+    if (ticks != null) simulationTicks = ticks;
+    if (agents != null) agentCount = agents;
     notifyListeners();
   }
 }
