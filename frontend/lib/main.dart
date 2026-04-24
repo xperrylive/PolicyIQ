@@ -143,7 +143,7 @@ class _AppShellState extends State<AppShell> with TickerProviderStateMixin {
     final screens = <Widget>[
       GatekeeperScreen(onNavigate: _navigateTo),
       const DashboardScreen(),
-      const ControlPanelScreen(),
+      ControlPanelScreen(onNavigate: _navigateTo),
       const MacroAnalyticsScreen(),
       const MicroInsightsScreen(),
       const AnomalyDashboardScreen(),

@@ -11,47 +11,12 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../services/api_client.dart';
 import '../state/simulation_state.dart';
 import '../models/contracts.dart';
 import '../theme/app_theme.dart';
 
 class DashboardScreen extends StatelessWidget {
   const DashboardScreen({super.key});
-
-  Future<void> _runSimulation(BuildContext context) async {
-    final state = context.read<SimulationState>();
-    final client = context.read<ApiClient>();
-    
-    if (state.policyText.isEmpty) return;
-    if (state.status != SimulationStatus.readyToReview && 
-        state.status != SimulationStatus.completed) return;
-    
-    state.setSimulating();
-
-    final request = SimulateRequest(
-      policyText: state.policyText,
-      simulationTicks: state.simulationTicks,
-      agentCount: state.agentCount,
-      knobOverrides: state.knobOverrides,
-    );
-
-    try {
-      await for (final event in client.simulateStream(request)) {
-        switch (event.type) {
-          case 'tick':
-            state.addTick(TickSummary.fromJson(event.data));
-          case 'complete':
-            state.setSimulationComplete(SimulateResponse.fromJson(event.data));
-          case 'error':
-            state.setSimulationFailed(
-                event.data['detail']?.toString() ?? 'Unknown error');
-        }
-      }
-    } catch (e) {
-      state.setSimulationFailed(e.toString());
-    }
-  }
 
   void _showSaveScenarioDialog(BuildContext context) {
     final state = context.read<SimulationState>();
@@ -145,9 +110,6 @@ class DashboardScreen extends StatelessWidget {
         ? state.rewardStabilityHistory.last
         : null;
 
-    final canRun = state.status == SimulationStatus.readyToReview ||
-        state.status == SimulationStatus.completed;
-
     return Container(
       padding: const EdgeInsets.fromLTRB(24, 16, 24, 12),
       decoration: const BoxDecoration(
@@ -208,34 +170,29 @@ class DashboardScreen extends StatelessWidget {
                     borderRadius: BorderRadius.circular(6)),
               ),
             ),
-            const SizedBox(width: 8),
           ],
           if (state.status == SimulationStatus.simulating)
-            const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(
-                    strokeWidth: 2, color: AppTheme.accentCyan)),
-          if (canRun)
-            ElevatedButton.icon(
-              onPressed: () => _runSimulation(context),
-              icon: const Icon(Icons.play_arrow_rounded, size: 16),
-              label: const Text('RUN SIMULATION',
-                  style: TextStyle(
+            Row(
+              children: [
+                const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: AppTheme.accentCyan)),
+                const SizedBox(width: 8),
+                Text(
+                  'SIMULATING ${state.ticks.length}/${state.simulationTicks}',
+                  style: const TextStyle(
                       fontFamily: 'SpaceMono',
                       fontSize: 10,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.8)),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppTheme.accentPurple,
-                foregroundColor: Colors.white,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(6)),
-              ),
+                      fontWeight: FontWeight.w600,
+                      color: AppTheme.accentCyan),
+                ),
+              ],
             ),
-          if (!canRun && state.status != SimulationStatus.simulating)
+          if (state.status == SimulationStatus.idle ||
+              state.status == SimulationStatus.validating ||
+              state.status == SimulationStatus.readyToReview)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
@@ -244,7 +201,7 @@ class DashboardScreen extends StatelessWidget {
                 border: Border.all(
                     color: AppTheme.accentAmber.withValues(alpha: 0.3)),
               ),
-              child: const Text('VALIDATE POLICY FIRST',
+              child: const Text('LAUNCH FROM CONTROL PANEL',
                   style: TextStyle(
                       fontFamily: 'SpaceMono',
                       fontSize: 9,
@@ -609,16 +566,16 @@ class _MacroColumn extends StatelessWidget {
                         fontWeight: FontWeight.w700,
                         color: AppTheme.textMuted,
                         letterSpacing: 0.8)),
-                const SizedBox(height: 12),
+                const SizedBox(height: 8),
                 const Text(
-                    'Knob(t+1) = Knob(t) × (1 + macro_delta)',
+                    'Read-only view of initial policy-driven knob values',
                     style: TextStyle(
                         fontFamily: 'SpaceMono',
                         fontSize: 9,
                         color: AppTheme.textSecondary,
                         fontStyle: FontStyle.italic)),
                 const SizedBox(height: 16),
-                _buildKnobList(),
+                _buildKnobSliders(),
               ],
             ),
           ),
@@ -650,51 +607,87 @@ class _MacroColumn extends StatelessWidget {
     );
   }
 
-  Widget _buildKnobList() {
+  Widget _buildKnobSliders() {
     final knobs = [
-      ('Disposable Income Δ', AppTheme.accentGreen),
-      ('Operational Expense Index', AppTheme.accentRed),
-      ('Capital Access Pressure', AppTheme.accentAmber),
-      ('Systemic Friction', AppTheme.accentRed),
-      ('Social Equity Weight', AppTheme.accentCyan),
-      ('Systemic Trust Baseline', AppTheme.accentGreen),
-      ('Future Mobility Index', AppTheme.accentCyan),
-      ('Ecological Resource Pressure', AppTheme.accentAmber),
+      ('Disposable Income Δ', state.knobOverrides.disposableIncomeDelta ?? 0.0, AppTheme.accentGreen),
+      ('Operational Expense Index', state.knobOverrides.operationalExpenseIndex ?? 0.0, AppTheme.accentRed),
+      ('Capital Access Pressure', state.knobOverrides.capitalAccessPressure ?? 0.0, AppTheme.accentAmber),
+      ('Systemic Friction', state.knobOverrides.systemicFriction ?? 0.0, AppTheme.accentRed),
+      ('Social Equity Weight', state.knobOverrides.socialEquityWeight ?? 0.0, AppTheme.accentCyan),
+      ('Systemic Trust Baseline', state.knobOverrides.systemicTrustBaseline ?? 0.0, AppTheme.accentGreen),
+      ('Future Mobility Index', state.knobOverrides.futureMobilityIndex ?? 0.0, AppTheme.accentCyan),
+      ('Ecological Pressure', state.knobOverrides.ecologicalPressure ?? 0.0, AppTheme.accentAmber),
     ];
 
     return Column(
       children: knobs.map((knob) {
+        final name = knob.$1;
+        final value = knob.$2;
+        final color = knob.$3;
+        
         return Container(
-          margin: const EdgeInsets.only(bottom: 8),
-          padding: const EdgeInsets.all(10),
+          margin: const EdgeInsets.only(bottom: 12),
+          padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
             color: AppTheme.surface,
             borderRadius: BorderRadius.circular(6),
             border: Border.all(color: AppTheme.border),
           ),
-          child: Row(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                width: 4,
-                height: 24,
-                decoration: BoxDecoration(
-                  color: knob.$2,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(knob.$1,
-                    style: const TextStyle(
+              Row(
+                children: [
+                  Container(
+                    width: 4,
+                    height: 24,
+                    decoration: BoxDecoration(
+                      color: color,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(name,
+                        style: const TextStyle(
+                            fontFamily: 'SpaceMono',
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                            color: AppTheme.textPrimary)),
+                  ),
+                  Text(
+                    '${(value * 100).toStringAsFixed(0)}%',
+                    style: TextStyle(
                         fontFamily: 'SpaceMono',
                         fontSize: 10,
-                        color: AppTheme.textPrimary)),
+                        fontWeight: FontWeight.w700,
+                        color: color),
+                  ),
+                ],
               ),
-              Text('→',
-                  style: TextStyle(
-                      fontFamily: 'SpaceMono',
-                      fontSize: 10,
-                      color: knob.$2)),
+              const SizedBox(height: 8),
+              // Read-only slider visualization
+              Stack(
+                children: [
+                  Container(
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: AppTheme.border,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  FractionallySizedBox(
+                    widthFactor: ((value + 1.0) / 2.0).clamp(0.0, 1.0),
+                    child: Container(
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: color,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ],
           ),
         );

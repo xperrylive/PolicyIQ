@@ -91,7 +91,7 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
     }
   }
 
-  void _goToControlPanel() => widget.onNavigate?.call(1);
+  void _goToControlPanel() => widget.onNavigate?.call(2);
 
   Color _getStatusColor(SimulationStatus status) {
     switch (status) {
@@ -570,18 +570,17 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
 
 class _SectionLabel extends StatelessWidget {
   final String text;
-  final Color? color;
 
-  const _SectionLabel(this.text, {this.color});
+  const _SectionLabel(this.text);
 
   @override
   Widget build(BuildContext context) {
     return Text(text,
-        style: TextStyle(
+        style: const TextStyle(
             fontFamily: 'SpaceMono',
             fontSize: 11,
             fontWeight: FontWeight.w700,
-            color: color ?? AppTheme.textMuted,
+            color: AppTheme.textMuted,
             letterSpacing: 1));
   }
 }

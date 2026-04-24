@@ -5,10 +5,11 @@ import '../models/system_models.dart';
 import '../models/contracts.dart';
 import '../state/simulation_state.dart';
 import '../services/api_client.dart';
-import '../widgets/control/stability_meter.dart';
 
 class ControlPanelScreen extends StatefulWidget {
-  const ControlPanelScreen({super.key});
+  final void Function(int tabIndex)? onNavigate;
+
+  const ControlPanelScreen({super.key, this.onNavigate});
 
   @override
   State<ControlPanelScreen> createState() => _ControlPanelScreenState();
@@ -18,9 +19,6 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
     with TickerProviderStateMixin {
   late List<UniversalKnob> _knobs;
   bool _overrideActive = false;
-  String? _activeKnobId;
-  late AnimationController _scanCtrl;
-  late Animation<double> _scanAnim;
 
   // Simulation parameters — linked to SimulationState
   int _simTicks = 4;
@@ -78,21 +76,43 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
   @override
   void initState() {
     super.initState();
-    _scanCtrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 2000),
-    );
-    _scanAnim = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _scanCtrl, curve: Curves.easeInOut),
-    );
-    _scanCtrl.repeat(reverse: true);
     _knobs = _initializeUniversalKnobs();
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Sync knobs with blueprint values when entering this screen
+    _syncKnobsWithBlueprint();
+  }
+
+  @override
   void dispose() {
-    _scanCtrl.dispose();
     super.dispose();
+  }
+
+  /// Sync knob values with the current SimulationState knobOverrides
+  void _syncKnobsWithBlueprint() {
+    final simState = context.read<SimulationState>();
+    final overrides = simState.knobOverrides;
+    
+    print('[CONTROL_PANEL] Syncing knobs with overrides: $overrides');
+    
+    setState(() {
+      _knobs[0].value = overrides.disposableIncomeDelta ?? 0.0;
+      _knobs[1].value = overrides.operationalExpenseIndex ?? 0.0;
+      _knobs[2].value = overrides.capitalAccessPressure ?? 0.0;
+      _knobs[3].value = overrides.systemicFriction ?? 0.0;
+      _knobs[4].value = overrides.socialEquityWeight ?? 0.0;
+      _knobs[5].value = overrides.systemicTrustBaseline ?? 0.0;
+      _knobs[6].value = overrides.futureMobilityIndex ?? 0.0;
+      _knobs[7].value = overrides.ecologicalPressure ?? 0.0;
+      
+      print('[CONTROL_PANEL] Knob values after sync: ${_knobs.map((k) => '${k.label}: ${k.value}').join(', ')}');
+      
+      // Don't auto-enable override mode - keep knobs read-only by default
+      // _overrideActive remains false unless user clicks Advanced Mode
+    });
   }
 
   List<UniversalKnob> _initializeUniversalKnobs() {
@@ -156,15 +176,6 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
     ];
   }
 
-  double _getSystemStress() {
-    // Calculate overall system stress based on knob values
-    double stress = 0.0;
-    for (final knob in _knobs) {
-      stress += knob.value.abs();
-    }
-    return (stress / _knobs.length).clamp(0.0, 1.0);
-  }
-
   void _applyPreset(Map<String, dynamic> preset) {
     final values = preset['values'] as Map<UniversalKnobType, double>;
     setState(() {
@@ -177,26 +188,43 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
 
   @override
   Widget build(BuildContext context) {
-    final stress = _getSystemStress();
+    final simState = context.watch<SimulationState>();
+    final blueprint = simState.environmentBlueprint;
+    
+    print('[CONTROL_PANEL] Build called - Status: ${simState.status}');
+    print('[CONTROL_PANEL] Blueprint: ${blueprint != null ? 'exists with ${blueprint.dynamicSublayers.length} sublayers' : 'null'}');
+    print('[CONTROL_PANEL] KnobOverrides: ${simState.knobOverrides}');
+    
     return Scaffold(
       backgroundColor: AppTheme.background,
       body: Column(
         children: [
-          _buildTopBar(stress),
-          Expanded(
-            child: Row(
-              children: [
-                _buildKnobPanel(),
-                _buildRadarPanel(stress),
-              ],
+          _buildTopBar(),
+          // Sublayer Gallery - Full Width
+          if (blueprint != null)
+            _buildSublayerGallery(blueprint)
+          else
+            Container(
+              padding: const EdgeInsets.all(20),
+              child: const Text(
+                'No AI blueprint available. Please validate a policy first.',
+                style: TextStyle(
+                  fontFamily: 'SpaceMono',
+                  fontSize: 11,
+                  color: AppTheme.textMuted,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
             ),
+          Expanded(
+            child: _buildMainContent(simState),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildTopBar(double stress) {
+  Widget _buildTopBar() {
     return Container(
       height: 48,
       padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -206,232 +234,443 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
       ),
       child: Row(
         children: [
-          _buildBreadcrumb('Control Panel', true),
-          const Icon(Icons.chevron_right, size: 12, color: AppTheme.textMuted),
-          _buildBreadcrumb('Universal Knobs', false),
-          const Spacer(),
-          AnimatedBuilder(
-            animation: _scanAnim,
-            builder: (context, _) {
-              final scanColor = stress > 0.6
-                  ? AppTheme.accentRed
-                  : stress > 0.35
-                      ? AppTheme.accentAmber
-                      : AppTheme.accentGreen;
-              return Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: scanColor.withOpacity(0.08),
-                  borderRadius: BorderRadius.circular(3),
-                  border: Border.all(color: scanColor.withOpacity(0.3)),
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 6,
-                      height: 6,
-                      decoration: BoxDecoration(
-                        color: scanColor,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      stress > 0.6
-                          ? 'HIGH STRESS'
-                          : stress > 0.35
-                              ? 'MODERATE'
-                              : 'STABLE',
-                      style: TextStyle(
-                        fontFamily: 'SpaceMono',
-                        fontSize: 8,
-                        color: scanColor,
-                        letterSpacing: 1.5,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            },
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: AppTheme.accentAmber.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: AppTheme.accentAmber.withValues(alpha: 0.3)),
+            ),
+            child: const Icon(Icons.tune, color: AppTheme.accentAmber, size: 16),
+          ),
+          const SizedBox(width: 12),
+          const Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text('CONTROL PANEL',
+                  style: TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: AppTheme.textPrimary)),
+              Text('Review AI Physics & Launch Simulation',
+                  style: TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 9,
+                      color: AppTheme.textMuted)),
+            ],
           ),
         ],
       ),
     );
   }
 
-  Widget _buildBreadcrumb(String label, bool isActive) {
-    return Text(
-      label,
-      style: TextStyle(
-        fontFamily: 'SpaceMono',
-        fontSize: 10,
-        color: isActive ? AppTheme.textPrimary : AppTheme.textMuted,
-        fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
+  Widget _buildSublayerGallery(EnvironmentBlueprint blueprint) {
+    print('[CONTROL_PANEL] Building sublayer gallery with ${blueprint.dynamicSublayers.length} sublayers');
+    for (final sublayer in blueprint.dynamicSublayers) {
+      print('[CONTROL_PANEL] Sublayer: ${sublayer.name} -> ${sublayer.parentKnob} (${sublayer.policyValue - sublayer.baselineValue})');
+    }
+    
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppTheme.accentCyan.withValues(alpha: 0.05),
+        border: const Border(bottom: BorderSide(color: AppTheme.border)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.layers, size: 12, color: AppTheme.accentCyan),
+              const SizedBox(width: 6),
+              const Text('AI ENVIRONMENT BLUEPRINT',
+                  style: TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      color: AppTheme.accentCyan,
+                      letterSpacing: 0.8)),
+              const SizedBox(width: 6),
+              const Text('(Auto-applied to knobs)',
+                  style: TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 8,
+                      color: AppTheme.textMuted,
+                      fontStyle: FontStyle.italic)),
+              const Spacer(),
+              Text('${blueprint.dynamicSublayers.length} sublayers',
+                  style: const TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 8,
+                      color: AppTheme.textMuted)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          blueprint.dynamicSublayers.isEmpty
+              ? Container(
+                  height: 70,
+                  alignment: Alignment.center,
+                  child: const Text(
+                    'No sublayers generated by AI. Check policy validation.',
+                    style: TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 10,
+                      color: AppTheme.textMuted,
+                      fontStyle: FontStyle.italic,
+                    ),
+                  ),
+                )
+              : SizedBox(
+                  height: 70,
+                  child: ListView.builder(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: blueprint.dynamicSublayers.length,
+                    itemBuilder: (context, index) {
+                      final sublayer = blueprint.dynamicSublayers[index];
+                      return _buildSublayerCard(sublayer);
+                    },
+                  ),
+                ),
+        ],
       ),
     );
   }
 
-  Widget _buildKnobPanel() {
-    return Expanded(
-      flex: 2,
-      child: GlassPanel(
-        child: Column(
-          children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-              decoration: const BoxDecoration(
-                border: Border(bottom: BorderSide(color: AppTheme.border)),
+  Widget _buildSublayerCard(BlueprintSublayer sublayer) {
+    final impactColor = sublayer.impactType == 'income'
+        ? AppTheme.accentGreen
+        : sublayer.impactType == 'expense'
+            ? AppTheme.accentRed
+            : AppTheme.accentAmber;
+
+    final delta = sublayer.policyValue - sublayer.baselineValue;
+    final deltaStr = '${delta >= 0 ? '+' : ''}${delta.toStringAsFixed(2)}';
+
+    return Container(
+      width: 160,
+      margin: const EdgeInsets.only(right: 10),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: AppTheme.surface,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: impactColor.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 4,
+                height: 24,
+                decoration: BoxDecoration(
+                  color: impactColor,
+                  borderRadius: BorderRadius.circular(2),
+                ),
               ),
-              child: Row(
-                children: [
-                  const SectionLabel('Universal Knobs'),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      '8 parameters governing societal simulation',
-                      style: TextStyle(
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(sublayer.name,
+                    style: const TextStyle(
                         fontFamily: 'SpaceMono',
-                        fontSize: 12,
-                        color: AppTheme.textMuted,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Tooltip(
-                    message: 'Override policy effects with manual knob adjustments',
-                    child: GestureDetector(
-                      onTap: () => setState(() => _overrideActive = !_overrideActive),
-                      child: Row(
-                        children: [
-                          Icon(
-                            _overrideActive ? Icons.lock_open : Icons.lock,
-                            size: 14,
-                            color: _overrideActive
-                                ? AppTheme.accentAmber
-                                : AppTheme.textMuted,
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            _overrideActive ? 'OVERRIDE ON' : 'OVERRIDE OFF',
-                            style: TextStyle(
-                              fontFamily: 'SpaceMono',
-                              fontSize: 10,
-                              color: _overrideActive
-                                  ? AppTheme.accentAmber
-                                  : AppTheme.textMuted,
-                              letterSpacing: 1,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
+                        fontSize: 9,
+                        fontWeight: FontWeight.w600,
+                        color: AppTheme.textPrimary),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis),
+              ),
+            ],
+          ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(deltaStr,
+                  style: TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      color: impactColor)),
+              Text(sublayer.unit,
+                  style: const TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 8,
+                      color: AppTheme.textMuted)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMainContent(SimulationState simState) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 8 Universal Knobs - Compact Grid
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Row(
+                children: [
+                  Icon(Icons.tune, size: 14, color: AppTheme.accentAmber),
+                  SizedBox(width: 8),
+                  Text('8 UNIVERSAL KNOBS',
+                      style: TextStyle(
+                          fontFamily: 'SpaceMono',
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: AppTheme.textPrimary,
+                          letterSpacing: 0.8)),
+                  SizedBox(width: 8),
+                  Text('(AI-configured)',
+                      style: TextStyle(
+                          fontFamily: 'SpaceMono',
+                          fontSize: 9,
+                          color: AppTheme.textMuted,
+                          fontStyle: FontStyle.italic)),
                 ],
               ),
-            ),
-            Expanded(
-              child: GridView.builder(
-                padding: const EdgeInsets.all(16),
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 2,
-                  childAspectRatio: 1.8,
-                  crossAxisSpacing: 16,
-                  mainAxisSpacing: 16,
-                ),
-                itemCount: _knobs.length,
-                itemBuilder: (context, i) {
-                  final knob = _knobs[i];
-                  return GestureDetector(
-                    onTap: () => setState(() => _activeKnobId = knob.type.name),
-                    child: _buildUniversalKnobCard(knob, _activeKnobId == knob.type.name),
-                  );
-                },
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: const BoxDecoration(
-                border: Border(top: BorderSide(color: AppTheme.border)),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const SectionLabel('Presets'),
-                  const SizedBox(height: 12),
-                  ..._presets.map((preset) => Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: GestureDetector(
-                      onTap: () => _applyPreset(preset),
-                      child: Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: (preset['color'] as Color).withOpacity(0.05),
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(
-                            color: (preset['color'] as Color).withOpacity(0.2),
-                          ),
+              GestureDetector(
+                onTap: () => setState(() => _overrideActive = !_overrideActive),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: _overrideActive 
+                        ? AppTheme.accentAmber.withValues(alpha: 0.1)
+                        : AppTheme.border.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(
+                      color: _overrideActive 
+                          ? AppTheme.accentAmber.withValues(alpha: 0.5)
+                          : AppTheme.border,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        _overrideActive ? Icons.edit : Icons.lock,
+                        size: 12,
+                        color: _overrideActive ? AppTheme.accentAmber : AppTheme.textMuted,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        _overrideActive ? 'ADVANCED MODE' : 'ADVANCED',
+                        style: TextStyle(
+                          fontFamily: 'SpaceMono',
+                          fontSize: 9,
+                          color: _overrideActive ? AppTheme.accentAmber : AppTheme.textMuted,
+                          fontWeight: FontWeight.w700,
                         ),
-                        child: Row(
-                          children: [
-                            Container(
-                              width: 12,
-                              height: 12,
-                              decoration: BoxDecoration(
-                                color: preset['color'] as Color,
-                                shape: BoxShape.circle,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          _buildCompactKnobGrid(),
+          const SizedBox(height: 24),
+          
+          // Simulation Parameters & Launch
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Left: Simulation Parameters
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: AppTheme.surface,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppTheme.border),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.settings, size: 12, color: AppTheme.accentCyan),
+                          SizedBox(width: 6),
+                          Text('SIMULATION PARAMETERS',
+                              style: TextStyle(
+                                  fontFamily: 'SpaceMono',
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppTheme.textPrimary,
+                                  letterSpacing: 0.8)),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      _buildSimSlider(
+                        label: 'Ticks (Months)',
+                        value: _simTicks.toDouble(),
+                        min: 1,
+                        max: 12,
+                        divisions: 11,
+                        color: AppTheme.accentCyan,
+                        displayValue: '$_simTicks',
+                        onChanged: (v) {
+                          setState(() => _simTicks = v.round());
+                          simState.simulationTicks = v.round();
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      _buildSimSlider(
+                        label: 'Agent Count',
+                        value: _agentCount.toDouble(),
+                        min: 1,
+                        max: 50,
+                        divisions: 49,
+                        color: AppTheme.accentAmber,
+                        displayValue: '$_agentCount',
+                        onChanged: (v) {
+                          setState(() => _agentCount = v.round());
+                          simState.agentCount = v.round();
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 16),
+              
+              // Right: Quick Presets (Compact)
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: AppTheme.surface,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppTheme.border),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.flash_on, size: 12, color: AppTheme.accentGreen),
+                          SizedBox(width: 6),
+                          Text('QUICK PRESETS',
+                              style: TextStyle(
+                                  fontFamily: 'SpaceMono',
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppTheme.textPrimary,
+                                  letterSpacing: 0.8)),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      ..._presets.map((preset) => Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: GestureDetector(
+                          onTap: () => _applyPreset(preset),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: (preset['color'] as Color).withValues(alpha: 0.05),
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(
+                                color: (preset['color'] as Color).withValues(alpha: 0.2),
                               ),
                             ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 8,
+                                  height: 8,
+                                  decoration: BoxDecoration(
+                                    color: preset['color'] as Color,
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
                                     preset['name'] as String,
                                     style: TextStyle(
                                       fontFamily: 'SpaceMono',
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w700,
+                                      fontSize: 9,
+                                      fontWeight: FontWeight.w600,
                                       color: preset['color'] as Color,
                                     ),
                                   ),
-                                  Text(
-                                    preset['description'] as String,
-                                    style: const TextStyle(
-                                      fontFamily: 'SpaceMono',
-                                      fontSize: 9,
-                                      color: AppTheme.textMuted,
-                                    ),
-                                  ),
-                                ],
-                              ),
+                                ),
+                                const Icon(Icons.arrow_forward, size: 10, color: AppTheme.textMuted),
+                              ],
                             ),
-                          ],
+                          ),
                         ),
-                      ),
-                    ),
-                  )),
-                ],
+                      )),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          
+          // Launch Button - Full Width
+          _buildLaunchButton(simState),
+          
+          if (simState.simulationError != null) ...[
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppTheme.accentRed.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: AppTheme.accentRed.withValues(alpha: 0.3)),
+              ),
+              child: Text(
+                simState.simulationError!,
+                style: const TextStyle(
+                  fontFamily: 'SpaceMono',
+                  fontSize: 10,
+                  color: AppTheme.accentRed,
+                ),
               ),
             ),
           ],
-        ),
+        ],
       ),
     );
   }
 
-  Widget _buildUniversalKnobCard(UniversalKnob knob, bool isActive) {
+  Widget _buildCompactKnobGrid() {
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 4,
+        childAspectRatio: 2.2, // Increased from 3.5 to fix overflow
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 12,
+      ),
+      itemCount: _knobs.length,
+      itemBuilder: (context, i) {
+        final knob = _knobs[i];
+        return _buildCompactKnobCard(knob);
+      },
+    );
+  }
+
+  Widget _buildCompactKnobCard(UniversalKnob knob) {
+    final isAdvancedMode = _overrideActive;
+    
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: isActive ? AppTheme.surfaceElevated : AppTheme.surface,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(
-          color: isActive ? knob.accentColor.withOpacity(0.5) : AppTheme.border,
-          width: isActive ? 2 : 1,
-        ),
+        color: AppTheme.surface,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: knob.accentColor.withValues(alpha: 0.3)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -439,146 +678,66 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
           Row(
             children: [
               Container(
-                width: 8,
-                height: 8,
+                width: 6,
+                height: 6,
                 decoration: BoxDecoration(
                   color: knob.accentColor,
                   shape: BoxShape.circle,
                 ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 6),
               Expanded(
                 child: Text(
                   knob.label,
-                  style: TextStyle(
+                  style: const TextStyle(
                     fontFamily: 'SpaceMono',
                     fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    color: isActive ? knob.accentColor : AppTheme.textPrimary,
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.textPrimary,
                   ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
               Text(
                 '${(knob.value * 100).toStringAsFixed(0)}%',
                 style: TextStyle(
                   fontFamily: 'SpaceMono',
                   fontSize: 10,
                   color: knob.accentColor,
-                  fontWeight: FontWeight.w600,
+                  fontWeight: FontWeight.w700,
                 ),
               ),
+              if (!isAdvancedMode)
+                const Icon(Icons.lock, size: 10, color: AppTheme.textMuted),
             ],
           ),
           const SizedBox(height: 8),
-          Text(
-            knob.description,
-            style: const TextStyle(
-              fontFamily: 'SpaceMono',
-              fontSize: 9,
-              color: AppTheme.textMuted,
-            ),
-          ),
-          const SizedBox(height: 12),
           SliderTheme(
             data: SliderTheme.of(context).copyWith(
               activeTrackColor: knob.accentColor,
-              inactiveTrackColor: knob.accentColor.withOpacity(0.2),
+              inactiveTrackColor: knob.accentColor.withValues(alpha: 0.2),
               thumbColor: knob.accentColor,
-              overlayColor: knob.accentColor.withOpacity(0.1),
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-              trackHeight: 2,
+              overlayColor: knob.accentColor.withValues(alpha: 0.1),
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
+              trackHeight: 3,
             ),
             child: Slider(
               value: knob.value,
               min: -1.0,
               max: 1.0,
-              onChanged: (value) {
+              onChanged: isAdvancedMode ? (value) {
                 setState(() => knob.value = value);
-              },
+              } : null,
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildRadarPanel(double stress) {
-    final simState = context.watch<SimulationState>();
-    return Expanded(
-      child: GlassPanel(
-        child: Column(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                children: [
-                  const SectionLabel('System Stability'),
-                  const SizedBox(height: 16),
-                  _buildStabilityMeter(stress),
-                  const SizedBox(height: 20),
-                  _buildSystemMetrics(),
-                ],
-              ),
-            ),
-            const Divider(color: AppTheme.border, height: 1),
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const SectionLabel('Simulation Parameters'),
-                    const SizedBox(height: 16),
-                    _buildSimSlider(
-                      label: 'Ticks (Months)',
-                      value: _simTicks.toDouble(),
-                      min: 1,
-                      max: 12,
-                      divisions: 11,
-                      color: AppTheme.accentCyan,
-                      displayValue: '$_simTicks',
-                      onChanged: (v) {
-                        setState(() => _simTicks = v.round());
-                        simState.simulationTicks = v.round();
-                      },
-                    ),
-                    const SizedBox(height: 12),
-                    _buildSimSlider(
-                      label: 'Agent Count',
-                      value: _agentCount.toDouble(),
-                      min: 1,
-                      max: 50,
-                      divisions: 49,
-                      color: AppTheme.accentAmber,
-                      displayValue: '$_agentCount',
-                      onChanged: (v) {
-                        setState(() => _agentCount = v.round());
-                        simState.agentCount = v.round();
-                      },
-                    ),
-                    const SizedBox(height: 20),
-                    _buildSimulateButton(simState),
-                    if (simState.simulationError != null) ...[
-                      const SizedBox(height: 12),
-                      Text(
-                        simState.simulationError!,
-                        style: const TextStyle(
-                          fontFamily: 'SpaceMono',
-                          fontSize: 10,
-                          color: AppTheme.accentRed,
-                        ),
-                      ),
-                    ],
-                    if (simState.ticks.isNotEmpty) ...[
-                      const SizedBox(height: 16),
-                      _buildTickProgress(simState),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -647,68 +806,94 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
     );
   }
 
-  Widget _buildSimulateButton(SimulationState simState) {
-    final canSimulate = simState.status == SimulationStatus.readyToReview;
+  Widget _buildLaunchButton(SimulationState simState) {
+    final canLaunch = simState.status == SimulationStatus.readyToReview;
+    final isSimulating = simState.status == SimulationStatus.simulating;
+    
     return SizedBox(
       width: double.infinity,
       child: GestureDetector(
-        onTap: canSimulate ? () => _startSimulation(simState) : null,
+        onTap: canLaunch ? () => _launchSimulation(simState) : null,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 200),
-          padding: const EdgeInsets.symmetric(vertical: 14),
+          padding: const EdgeInsets.symmetric(vertical: 16),
           decoration: BoxDecoration(
-            color: canSimulate
-                ? AppTheme.accentCyan.withOpacity(0.12)
-                : AppTheme.border.withOpacity(0.3),
-            borderRadius: BorderRadius.circular(6),
+            gradient: canLaunch
+                ? LinearGradient(
+                    colors: [
+                      AppTheme.accentPurple,
+                      AppTheme.accentPurple.withValues(alpha: 0.8),
+                    ],
+                  )
+                : null,
+            color: canLaunch ? null : AppTheme.border.withValues(alpha: 0.3),
+            borderRadius: BorderRadius.circular(8),
             border: Border.all(
-              color: canSimulate
-                  ? AppTheme.accentCyan.withOpacity(0.6)
+              color: canLaunch
+                  ? AppTheme.accentPurple.withValues(alpha: 0.8)
                   : AppTheme.border,
-              width: 1.5,
+              width: 2,
             ),
+            boxShadow: canLaunch
+                ? [
+                    BoxShadow(
+                      color: AppTheme.accentPurple.withValues(alpha: 0.3),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    )
+                  ]
+                : null,
           ),
           child: Center(
-            child: simState.status == SimulationStatus.simulating
+            child: isSimulating
                 ? Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      SizedBox(
-                        width: 12,
-                        height: 12,
+                      const SizedBox(
+                        width: 16,
+                        height: 16,
                         child: CircularProgressIndicator(
-                          strokeWidth: 1.5,
-                          color: AppTheme.accentCyan,
+                          strokeWidth: 2,
+                          color: Colors.white,
                         ),
                       ),
-                      const SizedBox(width: 8),
+                      const SizedBox(width: 12),
                       Text(
-                        'SIMULATING ${simState.ticks.length}/$_simTicks',
+                        'LAUNCHING ${simState.ticks.length}/$_simTicks',
                         style: const TextStyle(
                           fontFamily: 'SpaceMono',
-                          fontSize: 11,
-                          color: AppTheme.accentCyan,
+                          fontSize: 12,
+                          color: Colors.white,
                           fontWeight: FontWeight.w700,
                           letterSpacing: 1.5,
                         ),
                       ),
                     ],
                   )
-                : Text(
-                    canSimulate
-                        ? 'START SIMULATION'
-                        : simState.isPolicyApproved
-                            ? 'READY'
-                            : 'VALIDATE POLICY FIRST',
-                    style: TextStyle(
-                      fontFamily: 'SpaceMono',
-                      fontSize: 11,
-                      color: canSimulate
-                          ? AppTheme.accentCyan
-                          : AppTheme.textMuted,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 1.5,
-                    ),
+                : Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.rocket_launch,
+                        size: 18,
+                        color: canLaunch ? Colors.white : AppTheme.textMuted,
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        canLaunch
+                            ? 'LAUNCH SIMULATION'
+                            : simState.isPolicyApproved
+                                ? 'READY TO LAUNCH'
+                                : 'VALIDATE POLICY FIRST',
+                        style: TextStyle(
+                          fontFamily: 'SpaceMono',
+                          fontSize: 12,
+                          color: canLaunch ? Colors.white : AppTheme.textMuted,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.5,
+                        ),
+                      ),
+                    ],
                   ),
           ),
         ),
@@ -716,82 +901,12 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
     );
   }
 
-  Widget _buildTickProgress(SimulationState simState) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'TICK RESULTS',
-          style: const TextStyle(
-            fontFamily: 'SpaceMono',
-            fontSize: 10,
-            color: AppTheme.textMuted,
-            letterSpacing: 1.2,
-          ),
-        ),
-        const SizedBox(height: 8),
-        ...simState.ticks.map((tick) => Padding(
-          padding: const EdgeInsets.only(bottom: 6),
-          child: Row(
-            children: [
-              Container(
-                width: 28,
-                height: 16,
-                decoration: BoxDecoration(
-                  color: AppTheme.accentCyan.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(2),
-                  border: Border.all(color: AppTheme.accentCyan.withOpacity(0.3)),
-                ),
-                child: Center(
-                  child: Text(
-                    'M${tick.tickId}',
-                    style: const TextStyle(
-                      fontFamily: 'SpaceMono',
-                      fontSize: 8,
-                      color: AppTheme.accentCyan,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Container(
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: AppTheme.border,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                  child: FractionallySizedBox(
-                    alignment: Alignment.centerLeft,
-                    widthFactor: ((tick.averageSentiment + 1.0) / 2.0).clamp(0.0, 1.0),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: tick.averageSentiment >= 0
-                            ? AppTheme.accentGreen
-                            : AppTheme.accentRed,
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                '${tick.averageSentiment >= 0 ? '+' : ''}${tick.averageSentiment.toStringAsFixed(2)}',
-                style: TextStyle(
-                  fontFamily: 'SpaceMono',
-                  fontSize: 9,
-                  color: tick.averageSentiment >= 0
-                      ? AppTheme.accentGreen
-                      : AppTheme.accentRed,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-        )),
-      ],
-    );
+  void _launchSimulation(SimulationState simState) {
+    // Start the simulation
+    _startSimulation(simState);
+    
+    // Navigate to Dashboard (index 1)
+    widget.onNavigate?.call(1);
   }
 
   void _startSimulation(SimulationState simState) {
@@ -857,137 +972,6 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
       onError: (Object e) {
         simState.setSimulationFailed(e.toString());
       },
-    );
-  }
-
-  Widget _buildStabilityMeter(double stress) {
-    return StabilityMeter(stress: stress);
-  }
-
-  Widget _buildSystemMetrics() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'Knob Distribution',
-          style: TextStyle(
-            fontFamily: 'SpaceMono',
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-            color: AppTheme.textPrimary,
-          ),
-        ),
-        const SizedBox(height: 12),
-        ..._knobs.map((knob) => Padding(
-          padding: const EdgeInsets.only(bottom: 8),
-          child: Row(
-            children: [
-              Container(
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  color: knob.accentColor,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  knob.label,
-                  style: const TextStyle(
-                    fontFamily: 'SpaceMono',
-                    fontSize: 10,
-                    color: AppTheme.textSecondary,
-                  ),
-                ),
-              ),
-              Container(
-                width: 60,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: AppTheme.border,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-                child: FractionallySizedBox(
-                  alignment: Alignment.centerLeft,
-                  widthFactor: (knob.value + 1.0) / 2.0,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: knob.value > 0 ? knob.accentColor : knob.accentColor.withOpacity(0.5),
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                knob.value > 0 ? '+' : '',
-                style: TextStyle(
-                  fontFamily: 'SpaceMono',
-                  fontSize: 9,
-                  color: knob.value > 0 ? knob.accentColor : AppTheme.textMuted,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              Text(
-                (knob.value.abs() * 100).toStringAsFixed(0),
-                style: TextStyle(
-                  fontFamily: 'SpaceMono',
-                  fontSize: 9,
-                  color: knob.accentColor,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-        )),
-      ],
-    );
-  }
-}
-
-class GlassPanel extends StatelessWidget {
-  final Widget child;
-
-  const GlassPanel({super.key, required this.child});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppTheme.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppTheme.border),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: child,
-    );
-  }
-}
-
-class SectionLabel extends StatelessWidget {
-  final String label;
-  final Color? color;
-
-  const SectionLabel(this.label, {super.key, this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Text(
-      label,
-      style: TextStyle(
-        fontFamily: 'SpaceMono',
-        fontSize: 12,
-        fontWeight: FontWeight.w700,
-        color: color ?? AppTheme.textPrimary,
-        letterSpacing: 1.2,
-      ),
     );
   }
 }
