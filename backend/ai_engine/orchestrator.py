@@ -539,6 +539,49 @@ class Orchestrator:
         "T20": {"expense": 0.30, "multiplier": 0.70, "income": 0.40},
     }
 
+    def compute_agent_reward(self, agent: dict, prev_agent: dict) -> float:
+        """
+        RL Reward Function — scalar reward Rt for a single agent tick.
+
+        Formula:
+            Rt = (0.5 × ΔDisposable Buffer)
+               + (0.3 × ΔSentiment)
+               − (0.2 × Debt-to-Income Stress)
+
+        Where:
+          - ΔDisposable Buffer = normalised change in disposable_buffer_rm
+            (clamped to [-1, 1] using monthly_income as denominator)
+          - ΔSentiment         = sentiment_score − prev_sentiment_score (clamped [-1, 1])
+          - DTI Stress         = current debt_to_income_ratio (already in [0, 1])
+
+        Positive reward → policy is helping the agent.
+        Negative reward → agent is struggling under the policy.
+
+        Args:
+            agent:      Current agent state (post-tick).
+            prev_agent: Agent state snapshot from the previous tick.
+
+        Returns:
+            Scalar reward in approximately [-1.5, 1.5].
+        """
+        monthly_income = max(agent.get("monthly_income_rm", 1.0), 1.0)
+
+        # ΔDisposable Buffer — normalised by monthly income, clamped [-1, 1]
+        curr_buffer = agent.get("disposable_buffer_rm", 0.0)
+        prev_buffer = prev_agent.get("disposable_buffer_rm", curr_buffer)
+        delta_buffer = max(-1.0, min(1.0, (curr_buffer - prev_buffer) / monthly_income))
+
+        # ΔSentiment — direct delta, clamped [-1, 1]
+        curr_sentiment = agent.get("sentiment_score", 0.0)
+        prev_sentiment = prev_agent.get("sentiment_score", curr_sentiment)
+        delta_sentiment = max(-1.0, min(1.0, curr_sentiment - prev_sentiment))
+
+        # DTI Stress — current ratio (higher = more stress)
+        dti_stress = max(0.0, min(1.0, agent.get("debt_to_income_ratio", 0.0)))
+
+        reward = (0.5 * delta_buffer) + (0.3 * delta_sentiment) - (0.2 * dti_stress)
+        return round(reward, 4)
+
     def compute_rl_observation(
         self,
         agent: dict,
@@ -1202,24 +1245,37 @@ class Orchestrator:
                 await asyncio.gather(*tasks, return_exceptions=False)
             )
 
-            # ── Step 4: Economic Impact — mutate agent state ───────────────────
+            # ── Step 4: RL Reward + State Update (St+1) ───────────────────────
+            reward_by_demo: dict[str, list[float]] = {"B40": [], "M40": [], "T20": []}
+            action_by_demo: dict[str, list[str]]   = {"B40": [], "M40": [], "T20": []}
+
             for agent, decision in zip(self._agents, decisions):
                 delta = decision["financial_health_change"]
-                agent["sentiment_score"] = decision["sentiment_score"]
+                demo  = agent.get("demographic", "M40")
+
+                # Snapshot pre-tick state for reward calculation
+                prev_agent_snapshot = {
+                    "disposable_buffer_rm": agent.get("disposable_buffer_rm", 0.0),
+                    "sentiment_score":      agent.get("sentiment_score", 0.0),
+                    "debt_to_income_ratio": agent.get("debt_to_income_ratio", 0.0),
+                    "monthly_income_rm":    agent.get("monthly_income_rm", 3000.0),
+                }
 
                 # ΔDI = Income − (Expenses × Inflation_Index) per agent
-                income          = agent.get("monthly_income_rm", 3000.0)
-                expenses        = income * 0.40
-                agent_di_delta  = round(income - (expenses * inflation_index), 2)
+                income         = agent.get("monthly_income_rm", 3000.0)
+                expenses       = income * 0.40
+                agent_di_delta = round(income - (expenses * inflation_index), 2)
                 decision["disposable_income_delta_rm"] = agent_di_delta
 
+                # Update agent state (St+1)
                 agent["disposable_buffer_rm"] = round(
                     agent.get("disposable_buffer_rm", 0.0) + delta, 2
                 )
+                agent["sentiment_score"] = decision["sentiment_score"]
 
                 monthly_income = agent.get("monthly_income_rm", 1.0)
                 if abs(delta) >= monthly_income * 0.20:
-                    savings_drain          = round(delta * 0.5, 2)
+                    savings_drain = round(delta * 0.5, 2)
                     agent["liquid_savings_rm"] = max(
                         0.0,
                         round(agent.get("liquid_savings_rm", 0.0) + savings_drain, 2),
@@ -1232,14 +1288,52 @@ class Orchestrator:
                         agent["agent_id"], agent.get("liquid_savings_rm", 0.0),
                     )
 
-                agent["financial_health"] = (
-                    agent.get("financial_health", 1000.0) + delta
+                agent["financial_health"] = agent.get("financial_health", 1000.0) + delta
+
+                # Compute RL reward using updated state vs pre-tick snapshot
+                reward = self.compute_agent_reward(agent, prev_agent_snapshot)
+                decision["reward_score"] = reward
+
+                # Bucket reward and action by demographic
+                if demo in reward_by_demo:
+                    reward_by_demo[demo].append(reward)
+                if demo in action_by_demo:
+                    action_by_demo[demo].append(decision.get("action", "hold_position"))
+
+                logger.debug(
+                    "[RL Reward] Agent %s (%s) │ reward=%.4f │ action=%s",
+                    agent["agent_id"], demo, reward, decision.get("action"),
                 )
+
+            # ── Step 5: Aggregate RL metrics per demographic ──────────────────
+            avg_reward_score: dict[str, float] = {}
+            for demo, rewards in reward_by_demo.items():
+                avg_reward_score[demo] = round(
+                    sum(rewards) / len(rewards) if rewards else 0.0, 4
+                )
+
+            # Summarise most common action per demographic (top-1 by frequency)
+            demo_action_summary: dict[str, str] = {}
+            for demo, actions in action_by_demo.items():
+                if not actions:
+                    demo_action_summary[demo] = "No agents in this group"
+                    continue
+                freq: dict[str, int] = {}
+                for a in actions:
+                    freq[a] = freq.get(a, 0) + 1
+                top_action = max(freq, key=lambda k: freq[k])
+                pct = round(freq[top_action] / len(actions) * 100)
+                demo_action_summary[demo] = f"{pct}% of {demo} agents are '{top_action}'"
 
             avg_sentiment = (
                 sum(d["sentiment_score"] for d in decisions) / len(decisions)
                 if decisions else 0.0
             )
+
+            # Reward Stability Score: maps avg reward across all agents to [0, 100]
+            all_rewards = [d.get("reward_score", 0.0) for d in decisions]
+            avg_reward_all = sum(all_rewards) / len(all_rewards) if all_rewards else 0.0
+            reward_stability_score = round(max(0.0, min(100.0, (avg_reward_all + 1.0) * 50.0)), 2)
 
             tick_payload = {
                 "tick_id":                    tick_num,
@@ -1248,6 +1342,10 @@ class Orchestrator:
                 "knob_state":                 knob_state_dict,
                 "avg_disposable_income_delta": avg_di_delta,
                 "inflation_index":            round(inflation_index, 4),
+                # ── RL enrichment ──────────────────────────────────────────────
+                "average_reward_score":       avg_reward_score,
+                "demo_action_summary":        demo_action_summary,
+                "reward_stability_score":     reward_stability_score,
             }
             self._tick_results.append(tick_payload)
             yield tick_payload
@@ -1277,8 +1375,14 @@ class Orchestrator:
             TickSummary(
                 tick_id=t["tick_id"],
                 average_sentiment=t["average_sentiment"],
+                average_reward_score=t.get("average_reward_score", {}),
+                demo_action_summary=t.get("demo_action_summary", {}),
+                reward_stability_score=t.get("reward_stability_score", 50.0),
                 agent_actions=[
-                    TickAgentAction(**{k: v for k, v in a.items() if k != "exploiting_loophole"})
+                    TickAgentAction(**{
+                        k: v for k, v in a.items()
+                        if k not in ("exploiting_loophole",)
+                    })
                     for a in t["agent_actions"]
                 ],
             )

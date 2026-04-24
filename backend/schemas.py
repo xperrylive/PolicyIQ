@@ -346,12 +346,35 @@ class TickAgentAction(BaseModel):
     financial_health_change: float
     internal_monologue: str
     is_breaking_point: bool
+    reward_score: float = Field(
+        default=0.0,
+        description="RL reward scalar for this agent on this tick. Positive = policy helping.",
+    )
 
 
 class TickSummary(BaseModel):
     tick_id: int
     average_sentiment: float
     agent_actions: list[TickAgentAction]
+    # ── RL enrichment ──────────────────────────────────────────────────────────
+    average_reward_score: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Average RL reward per demographic group (B40, M40, T20) for this tick.",
+    )
+    demo_action_summary: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Most common agent action per demographic, e.g. '70% of B40 agents are cutting expenses'.",
+    )
+    reward_stability_score: float = Field(
+        default=50.0,
+        ge=0.0,
+        le=100.0,
+        description=(
+            "Reward Stability Score [0–100]. Derived from average reward across all agents. "
+            "100 = policy is mathematically sustainable for all citizens. "
+            "0 = policy is causing widespread financial distress."
+        ),
+    )
 
 
 class Anomaly(BaseModel):
