@@ -20,6 +20,7 @@ dependencies:
   window_size: ^0.1.0
   http: ^1.1.0
   cupertino_icons: ^1.0.8
+  provider: ^6.1.5+1
 
 dev_dependencies:
   flutter_test:
