@@ -30,7 +30,6 @@ import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig
 
 from backend.ai_engine.physics import GlobalStateEngine
-from backend.ai_engine.rag_client import RAGClient
 
 # ─── Genkit Initialization (Robust Hunter) ────────────────────────────────────
 try:
@@ -239,7 +238,6 @@ class Orchestrator:
 
     def __init__(self) -> None:
         self._physics = GlobalStateEngine()
-        self._rag = RAGClient()
         self._decomposition: Optional[dict] = None
         self._tick_results: list[dict] = []
         self._agents: list[dict] = []
@@ -711,18 +709,10 @@ class Orchestrator:
     ) -> dict:
         """
         Contract C: Build the prompt payload for a single agent.
-
-        Retrieves RAG context then constructs the observation dict.
         """
-        rag_context = await self._rag.retrieve(
-            query=f"Economic conditions for {agent['demographic']} {agent['occupation']}",
-            demographic=agent["demographic"],
-            location=agent["location"],
-        )
         return {
             "tick_number": tick,
             "agent_profile": agent,
-            "rag_context": rag_context,
             "world_update": world_update,
         }
 
@@ -841,28 +831,28 @@ class Orchestrator:
         )
 
         # ── Gemini 1.5 Flash call (rate-limited via semaphore) ────────────────
-        async with Orchestrator.semaphore:
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    model = GenerativeModel(self._gemini_model)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                model = GenerativeModel(self._gemini_model)
 
-                    response_schema = {
-                        "type": "OBJECT",
-                        "properties": {
-                            "sentiment_score": {"type": "NUMBER"},
-                            "financial_health_change": {"type": "NUMBER"},
-                            "internal_monologue": {"type": "STRING"},
-                            "action_taken": {"type": "STRING"},
-                            "is_breaking_point": {"type": "BOOLEAN"},
-                            "exploiting_loophole": {"type": "BOOLEAN"}
-                        },
-                        "required": [
-                            "sentiment_score", "financial_health_change", "internal_monologue",
-                            "action_taken", "is_breaking_point", "exploiting_loophole"
-                        ]
-                    }
+                response_schema = {
+                    "type": "OBJECT",
+                    "properties": {
+                        "sentiment_score": {"type": "NUMBER"},
+                        "financial_health_change": {"type": "NUMBER"},
+                        "internal_monologue": {"type": "STRING"},
+                        "action_taken": {"type": "STRING"},
+                        "is_breaking_point": {"type": "BOOLEAN"},
+                        "exploiting_loophole": {"type": "BOOLEAN"}
+                    },
+                    "required": [
+                        "sentiment_score", "financial_health_change", "internal_monologue",
+                        "action_taken", "is_breaking_point", "exploiting_loophole"
+                    ]
+                }
 
+                async with Orchestrator.semaphore:
                     # GenerativeModel.generate_content is synchronous in the
                     # vertexai SDK — run it in a thread so we don't block the
                     # event loop and truly parallelise via asyncio.gather.
@@ -880,68 +870,19 @@ class Orchestrator:
                         ),
                     )
 
-                    raw_text = response.text.strip()
-                    logger.debug("Agent %s raw response: %s", agent_id, raw_text[:300])
+                raw_text = response.text.strip()
+                logger.debug("Agent %s raw response: %s", agent_id, raw_text[:300])
 
+                try:
                     # ALWAYS call _clean_json_text to catch markdown backticks etc.
+                    # Pydantic parsing / JSON loads fallback layer
                     payload = json.loads(self._clean_json_text(raw_text))
-
-                    # ── Normalise / clamp fields ──────────────────────────────────
-                    sentiment_score = float(
-                        max(-1.0, min(1.0, payload.get("sentiment_score", prev_sentiment)))
-                    )
-                    financial_health_change = float(
-                        payload.get("financial_health_change", 0.0)
-                    )
-                    internal_monologue = str(
-                        payload.get("internal_monologue", "No monologue returned.")
-                    )
-                    # observation.txt uses "action" but task spec requests
-                    # "action_taken" — accept both gracefully.
-                    action = str(
-                        payload.get("action_taken") or payload.get("action", "no_action")
-                    )
-                    is_breaking_point = bool(payload.get("is_breaking_point", False))
-                    exploiting_loophole = bool(payload.get("exploiting_loophole", False))
-
-                    logger.info(
-                        "Agent %s │ tick=%s │ sentiment=%.2f │ Δhealth=%.2f",
-                        agent_id,
-                        prompt_payload.get("tick_number", 1),
-                        sentiment_score,
-                        financial_health_change,
-                    )
-
-                    # RETURN CLEAN DICTIONARY (Remove debug bloat)
-                    return {
-                        "agent_id":                agent_id,
-                        "action":                  action,
-                        "sentiment":               sentiment_score,
-                        "sentiment_score":         sentiment_score,
-                        "financial_health_change": financial_health_change,
-                        "internal_monologue":      internal_monologue,
-                        "is_breaking_point":       is_breaking_point,
-                        "exploiting_loophole":     exploiting_loophole,
-                    }
-
-                except Exception as exc:  # noqa: BLE001
-                    if attempt < max_retries - 1:
-                        backoff = (2 ** attempt) + random.uniform(0.1, 0.5)
-                        logger.warning(
-                            "Agent %s: Gemini call failed (attempt %d/%d), retrying in %.2fs... Error: %s",
-                            agent_id, attempt + 1, max_retries, backoff, exc
-                        )
-                        await asyncio.sleep(backoff)
-                        continue
-
-                    # ── Graceful degradation: smart fallback ──────────────────────
-                    # No more "API error" text — calculate plausible values
+                except Exception as json_exc:
+                    logger.warning("Agent %s: JSON parsing failed, triggering Smart Fallback. Error: %s", agent_id, json_exc)
                     disposable = agent.get("disposable_buffer_rm", 0.0)
                     fallback_sentiment = -0.5 if disposable < 0 else -0.1
-                    
                     monthly_income_rm = agent.get("monthly_income_rm", "N/A")
                     location = agent.get("location", "Malaysia")
-                    
                     return {
                         "agent_id":                agent_id,
                         "action":                  "hold_position",
@@ -955,6 +896,76 @@ class Orchestrator:
                         "is_breaking_point":       False,
                         "exploiting_loophole":     False,
                     }
+
+                # ── Normalise / clamp fields ──────────────────────────────────
+                sentiment_score = float(
+                    max(-1.0, min(1.0, payload.get("sentiment_score", prev_sentiment)))
+                )
+                financial_health_change = float(
+                    payload.get("financial_health_change", 0.0)
+                )
+                internal_monologue = str(
+                    payload.get("internal_monologue", "No monologue returned.")
+                )
+                # observation.txt uses "action" but task spec requests
+                # "action_taken" — accept both gracefully.
+                action = str(
+                    payload.get("action_taken") or payload.get("action", "no_action")
+                )
+                is_breaking_point = bool(payload.get("is_breaking_point", False))
+                exploiting_loophole = bool(payload.get("exploiting_loophole", False))
+
+                logger.info(
+                    "Agent %s │ tick=%s │ sentiment=%.2f │ Δhealth=%.2f",
+                    agent_id,
+                    prompt_payload.get("tick_number", 1),
+                    sentiment_score,
+                    financial_health_change,
+                )
+
+                # RETURN CLEAN DICTIONARY (Remove debug bloat)
+                return {
+                    "agent_id":                agent_id,
+                    "action":                  action,
+                    "sentiment":               sentiment_score,
+                    "sentiment_score":         sentiment_score,
+                    "financial_health_change": financial_health_change,
+                    "internal_monologue":      internal_monologue,
+                    "is_breaking_point":       is_breaking_point,
+                    "exploiting_loophole":     exploiting_loophole,
+                }
+
+            except Exception as exc:  # noqa: BLE001
+                if attempt < max_retries - 1:
+                    backoff = (2 ** attempt) + random.uniform(0.1, 0.5)
+                    logger.warning(
+                        "Agent %s: Gemini call failed (attempt %d/%d), retrying in %.2fs... Error: %s",
+                        agent_id, attempt + 1, max_retries, backoff, exc
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+
+                # ── Graceful degradation: smart fallback ──────────────────────
+                # No more "API error" text — calculate plausible values
+                disposable = agent.get("disposable_buffer_rm", 0.0)
+                fallback_sentiment = -0.5 if disposable < 0 else -0.1
+                
+                monthly_income_rm = agent.get("monthly_income_rm", "N/A")
+                location = agent.get("location", "Malaysia")
+                
+                return {
+                    "agent_id":                agent_id,
+                    "action":                  "hold_position",
+                    "sentiment":               fallback_sentiment,
+                    "sentiment_score":         fallback_sentiment,
+                    "financial_health_change": 0.0,
+                    "internal_monologue":      (
+                        f"As a {occupation} in {location}, I'm worried about my RM {monthly_income_rm} "
+                        "income covering this fuel hike."
+                    ),
+                    "is_breaking_point":       False,
+                    "exploiting_loophole":     False,
+                }
 
     # ─── Executive Summary ────────────────────────────────────────────────────
 
