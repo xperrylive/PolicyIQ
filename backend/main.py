@@ -138,97 +138,47 @@ async def simulate(request: SimulateRequest) -> EventSourceResponse:
         request.agent_count,
     )
 
-    # Fresh Orchestrator per request — prevents state leakage between
-    # concurrent simulation calls.
-    request_orchestrator = Orchestrator()
+    # Fresh Orchestrator per request is now handled inside simulation_flow.
+    # No shared state needed here.
 
     async def event_generator() -> AsyncGenerator[dict, None]:
         import asyncio
-        queue = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue()
 
-        async def run_simulation_wrapper():
+        async def run_simulation_wrapper() -> None:
             try:
-                # 1. Feasibility check via Genkit flow
-                val_result = await validation_flow.run(request.policy_text)
-                if not val_result.get("is_feasible", True):
-                    await queue.put({
-                        "event": "error",
-                        "data": json.dumps({
-                            "detail": "Policy is unfeasible",
-                            "rejection_reason": val_result.get("rejection_reason"),
-                            "refined_options": val_result.get("refined_options", [])
-                        })
-                    })
-                    await queue.put(None)
+                input_data = {
+                    "policy":    request.policy_text,
+                    "request":   request,
+                    "sse_queue": queue,
+                }
+                result = await simulation_flow.run(input_data)
+
+                if "error" in result:
+                    # simulation_flow already pushed an error event; just close.
                     return
 
-                # 2. Prepare inputs for simulation_flow
-                # We need agents and policy
-                orch = Orchestrator()
-                agents = orch._load_agents()[: request.agent_count]
-                
-                # We define a helper to handle the tick streaming
-                # Since Genkit flows don't natively stream in Python Alpha yet,
-                # we'll have the flow logic call this queue.
-                
-                # However, to strictly follow "trigger simulation_flow.run()",
-                # we pass a callback or just run the flow and then yield.
-                # BUT the user wants real-time.
-                
-                # Let's refactor the flow in orchestrator.py to accept a callback
-                # or just use the orchestrator's existing generator inside the flow.
-                
-                input_data = {
-                    "policy": request.policy_text,
-                    "agents": agents,
-                    "ticks": request.simulation_ticks,
-                    "request": request # Pass full request for overrides
-                }
-
-                # We'll run the flow. To get real-time ticks, we'll have to 
-                # slightly modify the flow in orchestrator.py or how we call it.
-                # For now, let's assume simulation_flow returns the whole thing.
-                # To keep it real-time, we'll actually yield from the flow if it was a generator.
-                # Since it's not, we'll stick to the user's "trigger simulation_flow.run()"
-                # but we'll adapt the flow to push to this queue if we can.
-                
-                # Better: Let's run the flow and have it return the final result, 
-                # but for real-time SSE, we might need a middle ground.
-                
-                # Wait, the user said: "The Genkit flow should be executed such that we can still stream agent 'ticks'"
-                # This implies the flow execution IS the simulation.
-                
-                # I will modify orchestrator.py's simulation_flow to accept a queue.
-                
-                result = await simulation_flow.run({**input_data, "sse_queue": queue})
-                
-                # Summary is already in the result
+                # Push the Chief Economist summary as a dedicated event.
                 await queue.put({
                     "event": "summary",
-                    "data": json.dumps({"type": "summary", "content": result["summary"]}),
+                    "data":  json.dumps({"type": "summary", "content": result.get("summary", "")}),
                 })
 
-                # Final result
-                # We need to assemble the SimulateResponse
-                # Orchestrator.get_final_result() needs the state.
-                # This is a bit tricky since the flow uses a transient orchestrator.
-                # I'll modify the flow to return the final response object.
-                
+                # Push the full Contract E payload as the terminal "complete" event.
                 await queue.put({
                     "event": "complete",
-                    "data": result["final_response_json"],
+                    "data":  result.get("final_response_json", "{}"),
                 })
-                
+
             except Exception as e:
                 logger.exception("Simulation flow error")
                 await queue.put({
                     "event": "error",
-                    "data": json.dumps({"detail": str(e)}),
+                    "data":  json.dumps({"detail": str(e)}),
                 })
             finally:
-                await queue.put(None)
+                await queue.put(None)  # sentinel — signals the generator to stop
 
-        # Start the flow in the background
         asyncio.create_task(run_simulation_wrapper())
 
         while True:

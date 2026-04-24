@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../theme/app_theme.dart';
+import '../models/contracts.dart';
 import '../models/system_models.dart';
-import '../services/gatekeeper_service.dart';
+import '../services/api_client.dart';
 import '../services/decomposition_service.dart';
 
 enum InputValidationState { idle, typing, validating, vague, refined, ready }
@@ -27,7 +29,7 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
   late Animation<Offset> _slideAnim;
   
   // New policy validation state
-  PolicyValidationResult? _validationResult;
+  ValidatePolicyResponse? _validationResult;
   DecompositionResult? _decompositionResult;
   PolicyInput? _currentPolicy;
   bool _isValidating = false;
@@ -77,11 +79,16 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
     });
 
     try {
-      // Step 1: Validate policy with Gatekeeper
-      final validation = await GatekeeperService.validatePolicy(_controller.text);
-      
+      // Call the backend Gatekeeper via ApiClient and update SimulationState.
+      final simState = context.read<SimulationState>();
+      final client = context.read<ApiClient>();
+      simState.policyText = _controller.text;
+
+      final validation = await client.validatePolicy(_controller.text);
+      simState.setValidationResult(validation);
+
       if (!mounted) return;
-      
+
       setState(() {
         _validationResult = validation;
         _isValidating = false;
@@ -91,25 +98,24 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
         // Step 2: Decompose policy into Sub-Layers
         final decomposition = await DecompositionService.decomposePolicy(
           _controller.text,
-          validation.economicLever,
-          validation.targetGroups,
+          const [], // economicLever not in ValidatePolicyResponse; backend handles it
+          const [], // targetGroups not in ValidatePolicyResponse; backend handles it
         );
-        
+
         if (!mounted) return;
-        
+
         setState(() {
           _decompositionResult = decomposition;
           _state = InputValidationState.ready;
         });
-        
-        // Create policy input object
+
         _currentPolicy = PolicyInput(
           id: DateTime.now().millisecondsSinceEpoch.toString(),
           title: 'User Policy',
           description: _controller.text,
           policyText: _controller.text,
           createdAt: DateTime.now(),
-          validationResults: validation.toJson(),
+          validationResults: const {},
           refinedOptions: validation.refinedOptions,
         );
       } else {
@@ -117,7 +123,7 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
           _state = InputValidationState.vague;
         });
       }
-      
+
       _slideCtrl.forward();
     } catch (e) {
       if (!mounted) return;
@@ -438,7 +444,7 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
               ),
               const SizedBox(height: 8),
               Text(
-                _validationResult!.reasoning,
+                _validationResult!.rejectionReason ?? '',
                 style: const TextStyle(
                   fontFamily: 'SpaceMono',
                   fontSize: 11,

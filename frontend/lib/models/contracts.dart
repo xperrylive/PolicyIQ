@@ -17,6 +17,7 @@ class ValidatePolicyRequest {
 // ─── Contract Pre-B ──────────────────────────────────────────────────────────
 
 /// Contract Pre-B: response from POST /validate-policy
+/// Maps backend field `is_feasible` → Dart field `isValid` for UI consistency.
 class ValidatePolicyResponse {
   final bool isValid;
   final String? rejectionReason;
@@ -30,7 +31,8 @@ class ValidatePolicyResponse {
 
   factory ValidatePolicyResponse.fromJson(Map<String, dynamic> json) {
     return ValidatePolicyResponse(
-      isValid: json['is_valid'] as bool,
+      // Backend returns `is_feasible`; fall back to `is_valid` for safety.
+      isValid: (json['is_feasible'] ?? json['is_valid']) as bool,
       rejectionReason: json['rejection_reason'] as String?,
       refinedOptions: (json['refined_options'] as List<dynamic>?)
               ?.map((e) => e as String)

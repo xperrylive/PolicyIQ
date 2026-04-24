@@ -20,7 +20,7 @@ import '../models/contracts.dart';
 /// Base URL of the PolicyIQ FastAPI backend.
 /// Override this for different environments.
 const String _kApiBaseUrl =
-    String.fromEnvironment('API_BASE_URL', defaultValue: 'http://localhost:8000');
+    String.fromEnvironment('API_BASE_URL', defaultValue: 'http://127.0.0.1:8000');
 
 // ─── ApiClient ────────────────────────────────────────────────────────────────
 
@@ -160,6 +160,9 @@ class SimulationState extends ChangeNotifier {
   ValidatePolicyResponse? validationResult;
   bool isValidating = false;
   String? validationError;
+
+  /// True once the backend Gatekeeper has approved the policy (is_feasible == true).
+  bool get isPolicyApproved => validationResult?.isValid == true;
 
   // ── Simulation state ──────────────────────────────────────────────────────
   bool isSimulating = false;

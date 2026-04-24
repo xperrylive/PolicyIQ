@@ -196,20 +196,25 @@ async def simulation_flow(input_data: dict) -> dict:
       2. Multi-tick Agent Simulation (Parallel Execution — 50 agents)
       3. Local RAG grounding (backend/data/*.jsonl — primary source)
       4. Chief Economist Summary
+
+    Accepts an optional ``sse_queue`` (asyncio.Queue) in ``input_data``.
+    After every agent tick the flow puts a JSON payload onto the queue so
+    the /simulate SSE endpoint can stream events to the Flutter client in
+    real time.
     """
     policy_text = input_data.get("policy")
     request     = input_data.get("request")
-    sse_queue   = input_data.get("sse_queue")
+    sse_queue: Optional[asyncio.Queue] = input_data.get("sse_queue")
 
     orch = Orchestrator()
 
     try:
         async for tick_payload in orch._run_simulation_request(request):
-            if sse_queue:
+            if sse_queue is not None:
                 await sse_queue.put({"event": "tick", "data": json.dumps(tick_payload)})
     except Exception as exc:
         logger.exception("[Hybrid Inference] Internal error in simulation loop: %s", exc)
-        if sse_queue:
+        if sse_queue is not None:
             await sse_queue.put({"event": "error", "data": json.dumps({"detail": str(exc)})})
         return {"error": str(exc)}
 
@@ -217,10 +222,7 @@ async def simulation_flow(input_data: dict) -> dict:
         orch._tick_results[-1]["agent_actions"] if orch._tick_results else []
     )
 
-    summary = await ai.run(
-        "chief_economist_summary",
-        lambda: orch.generate_summary(last_tick_results, policy_text)
-    )
+    summary = await orch.generate_summary(last_tick_results, policy_text or "")
 
     final_response = await orch.get_final_result()
 
