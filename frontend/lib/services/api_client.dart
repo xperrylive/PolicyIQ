@@ -6,6 +6,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
@@ -32,18 +33,30 @@ class ApiClient {
     final uri = Uri.parse('$baseUrl/validate-policy');
     final request = ValidatePolicyRequest(rawPolicyText: rawPolicyText);
 
-    final response = await _httpClient.post(
-      uri,
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode(request.toJson()),
-    );
-
-    if (response.statusCode == 200) {
-      return ValidatePolicyResponse.fromJson(
-        jsonDecode(response.body) as Map<String, dynamic>,
+    try {
+      final response = await _httpClient.post(
+        uri,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(request.toJson()),
       );
+
+      if (response.statusCode == 200) {
+        return ValidatePolicyResponse.fromJson(
+          jsonDecode(response.body) as Map<String, dynamic>,
+        );
+      }
+      throw ApiException(response.statusCode, response.body);
+    } on SocketException catch (e) {
+      print('[API_CLIENT] SocketException: Backend is unreachable at $baseUrl');
+      print('[API_CLIENT] Error details: $e');
+      throw ApiException(
+        503,
+        'Backend is unreachable. Please ensure the FastAPI server is running at $baseUrl',
+      );
+    } catch (e) {
+      print('[API_CLIENT] Unexpected error in validatePolicy: $e');
+      rethrow;
     }
-    throw ApiException(response.statusCode, response.body);
   }
 
   // ── Contract A → SSE (tick / complete / error events) ─────────────────────

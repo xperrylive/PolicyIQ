@@ -439,6 +439,7 @@ class Orchestrator:
         final_prompt = gatekeeper_prompt.replace("{{policy_text}}", text)
 
         try:
+            logger.info("[Multi-Model] Calling Groq API for policy validation...")
             loop     = asyncio.get_event_loop()
             response = await loop.run_in_executor(
                 None,
@@ -497,11 +498,20 @@ class Orchestrator:
             )
 
         except Exception as exc:  # noqa: BLE001
-            logger.exception("[Multi-Model] Gatekeeper inference failed — Smart Fallback triggered: %s", exc)
+            logger.exception("[Multi-Model] Gatekeeper inference failed — Smart Fallback triggered")
+            logger.error("[Multi-Model] Error type: %s", type(exc).__name__)
+            logger.error("[Multi-Model] Error message: %s", str(exc))
+            
+            # Check if it's a Groq API error
+            if "api" in str(exc).lower() or "groq" in str(exc).lower():
+                error_msg = f"Groq API error: {str(exc)}"
+            else:
+                error_msg = f"Validation service error: {str(exc)}"
+            
             return ValidatePolicyResponse(
                 is_feasible=False,
                 rejection_reason=(
-                    "The policy validation service is temporarily unavailable. "
+                    f"The policy validation service encountered an error: {error_msg}. "
                     "Please try again in a moment."
                 ),
                 refined_options=[

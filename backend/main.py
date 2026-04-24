@@ -22,10 +22,10 @@ from typing import AsyncGenerator
 from dotenv import load_dotenv
 
 # Load .env from the project root (one level up from backend/).
-# Uses override=False so Docker env_file values always take precedence.
-# If .env doesn't exist (Docker), this is silently a no-op.
+# Uses override=True for local development so .env changes take effect immediately.
+# Docker env_file values are set after this, so they still take precedence.
 _env_path = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(_env_path, override=False)
+load_dotenv(_env_path, override=True)
 
 
 from fastapi import FastAPI, HTTPException
@@ -110,15 +110,23 @@ async def validate_policy(request: ValidatePolicyRequest) -> ValidatePolicyRespo
       up to 3 specific `refined_options` the user can adopt instead.
     - If `is_feasible` is `true`, the frontend should proceed to `POST /simulate`.
     """
-    logger.info("Gatekeeper received policy: %.80s…", request.raw_policy_text)
+    logger.info("=" * 80)
+    logger.info("RECEIVING POLICY VALIDATION REQUEST")
+    logger.info("Policy text: %s", request.raw_policy_text)
+    logger.info("=" * 80)
+    
     try:
         # Use Genkit flow for validation — returns full ValidatePolicyResponse dict
         # including the EnvironmentBlueprint when is_feasible=True
         result_dict = await validation_flow.run(request.raw_policy_text)
+        logger.info("Validation completed successfully: is_feasible=%s", result_dict.get("is_feasible"))
         return ValidatePolicyResponse(**result_dict)
     except Exception as exc:
-        logger.exception("Gatekeeper error")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("Gatekeeper error — returning clean 500 response")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Policy validation failed: {str(exc)}"
+        ) from exc
 
 
 # ─── Contract A → E (SSE) ────────────────────────────────────────────────────

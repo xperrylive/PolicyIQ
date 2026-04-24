@@ -83,10 +83,26 @@ class SimulationState extends ChangeNotifier {
   }
 
   void setValidationSuccess(ValidatePolicyResponse result) {
-    validationResult = result;
-    validationError = null;
-    _status = SimulationStatus.readyToReview;
-    notifyListeners();
+    try {
+      validationResult = result;
+      validationError = null;
+      
+      // Verify EnvironmentBlueprint can be accessed without errors
+      if (result.isValid && result.environmentBlueprint != null) {
+        final blueprint = result.environmentBlueprint!;
+        print('[SIMULATION_STATE] EnvironmentBlueprint loaded successfully:');
+        print('  - Policy Summary: ${blueprint.policySummary}');
+        print('  - Sublayers: ${blueprint.dynamicSublayers.length}');
+      }
+      
+      _status = SimulationStatus.readyToReview;
+      notifyListeners();
+    } catch (e) {
+      print('[SIMULATION_STATE] Error processing validation result: $e');
+      validationError = 'Failed to parse validation response: $e';
+      _status = SimulationStatus.failed;
+      notifyListeners();
+    }
   }
 
   void setValidationFailed(String error) {
