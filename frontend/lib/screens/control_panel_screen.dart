@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../theme/app_theme.dart';
 import '../models/system_models.dart';
+import '../models/contracts.dart';
+import '../services/api_client.dart';
 import '../widgets/control/stability_meter.dart';
 
 class ControlPanelScreen extends StatefulWidget {
@@ -17,6 +20,10 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
   String? _activeKnobId;
   late AnimationController _scanCtrl;
   late Animation<double> _scanAnim;
+
+  // Simulation parameters — linked to SimulationState
+  int _simTicks = 4;
+  int _agentCount = 5;
 
   // Presets for the 8 Universal Knobs
   final List<Map<String, dynamic>> _presets = [
@@ -495,6 +502,7 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
   }
 
   Widget _buildRadarPanel(double stress) {
+    final simState = context.watch<SimulationState>();
     return Expanded(
       child: GlassPanel(
         child: Column(
@@ -511,9 +519,349 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
                 ],
               ),
             ),
+            const Divider(color: AppTheme.border, height: 1),
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SectionLabel('Simulation Parameters'),
+                    const SizedBox(height: 16),
+                    _buildSimSlider(
+                      label: 'Ticks (Months)',
+                      value: _simTicks.toDouble(),
+                      min: 1,
+                      max: 12,
+                      divisions: 11,
+                      color: AppTheme.accentCyan,
+                      displayValue: '$_simTicks',
+                      onChanged: (v) {
+                        setState(() => _simTicks = v.round());
+                        simState.simulationTicks = v.round();
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    _buildSimSlider(
+                      label: 'Agent Count',
+                      value: _agentCount.toDouble(),
+                      min: 1,
+                      max: 50,
+                      divisions: 49,
+                      color: AppTheme.accentAmber,
+                      displayValue: '$_agentCount',
+                      onChanged: (v) {
+                        setState(() => _agentCount = v.round());
+                        simState.agentCount = v.round();
+                      },
+                    ),
+                    const SizedBox(height: 20),
+                    _buildSimulateButton(simState),
+                    if (simState.simulationError != null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        simState.simulationError!,
+                        style: const TextStyle(
+                          fontFamily: 'SpaceMono',
+                          fontSize: 10,
+                          color: AppTheme.accentRed,
+                        ),
+                      ),
+                    ],
+                    if (simState.ticks.isNotEmpty) ...[
+                      const SizedBox(height: 16),
+                      _buildTickProgress(simState),
+                    ],
+                  ],
+                ),
+              ),
+            ),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildSimSlider({
+    required String label,
+    required double value,
+    required double min,
+    required double max,
+    required int divisions,
+    required Color color,
+    required String displayValue,
+    required ValueChanged<double> onChanged,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              label,
+              style: const TextStyle(
+                fontFamily: 'SpaceMono',
+                fontSize: 10,
+                color: AppTheme.textSecondary,
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: color.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(3),
+                border: Border.all(color: color.withOpacity(0.3)),
+              ),
+              child: Text(
+                displayValue,
+                style: TextStyle(
+                  fontFamily: 'SpaceMono',
+                  fontSize: 10,
+                  color: color,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ],
+        ),
+        SliderTheme(
+          data: SliderTheme.of(context).copyWith(
+            activeTrackColor: color,
+            inactiveTrackColor: color.withOpacity(0.2),
+            thumbColor: color,
+            overlayColor: color.withOpacity(0.1),
+            thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+            trackHeight: 2,
+          ),
+          child: Slider(
+            value: value,
+            min: min,
+            max: max,
+            divisions: divisions,
+            onChanged: onChanged,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSimulateButton(SimulationState simState) {
+    final canSimulate = simState.isPolicyApproved && !simState.isSimulating;
+    return SizedBox(
+      width: double.infinity,
+      child: GestureDetector(
+        onTap: canSimulate ? () => _startSimulation(simState) : null,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          padding: const EdgeInsets.symmetric(vertical: 14),
+          decoration: BoxDecoration(
+            color: canSimulate
+                ? AppTheme.accentCyan.withOpacity(0.12)
+                : AppTheme.border.withOpacity(0.3),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(
+              color: canSimulate
+                  ? AppTheme.accentCyan.withOpacity(0.6)
+                  : AppTheme.border,
+              width: 1.5,
+            ),
+          ),
+          child: Center(
+            child: simState.isSimulating
+                ? Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 1.5,
+                          color: AppTheme.accentCyan,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        'SIMULATING ${simState.ticks.length}/$_simTicks',
+                        style: const TextStyle(
+                          fontFamily: 'SpaceMono',
+                          fontSize: 11,
+                          color: AppTheme.accentCyan,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.5,
+                        ),
+                      ),
+                    ],
+                  )
+                : Text(
+                    canSimulate
+                        ? 'START SIMULATION'
+                        : simState.isPolicyApproved
+                            ? 'READY'
+                            : 'VALIDATE POLICY FIRST',
+                    style: TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 11,
+                      color: canSimulate
+                          ? AppTheme.accentCyan
+                          : AppTheme.textMuted,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.5,
+                    ),
+                  ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTickProgress(SimulationState simState) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'TICK RESULTS',
+          style: const TextStyle(
+            fontFamily: 'SpaceMono',
+            fontSize: 10,
+            color: AppTheme.textMuted,
+            letterSpacing: 1.2,
+          ),
+        ),
+        const SizedBox(height: 8),
+        ...simState.ticks.map((tick) => Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Row(
+            children: [
+              Container(
+                width: 28,
+                height: 16,
+                decoration: BoxDecoration(
+                  color: AppTheme.accentCyan.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(2),
+                  border: Border.all(color: AppTheme.accentCyan.withOpacity(0.3)),
+                ),
+                child: Center(
+                  child: Text(
+                    'M${tick.tickId}',
+                    style: const TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 8,
+                      color: AppTheme.accentCyan,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Container(
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: AppTheme.border,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                  child: FractionallySizedBox(
+                    alignment: Alignment.centerLeft,
+                    widthFactor: ((tick.averageSentiment + 1.0) / 2.0).clamp(0.0, 1.0),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: tick.averageSentiment >= 0
+                            ? AppTheme.accentGreen
+                            : AppTheme.accentRed,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                '${tick.averageSentiment >= 0 ? '+' : ''}${tick.averageSentiment.toStringAsFixed(2)}',
+                style: TextStyle(
+                  fontFamily: 'SpaceMono',
+                  fontSize: 9,
+                  color: tick.averageSentiment >= 0
+                      ? AppTheme.accentGreen
+                      : AppTheme.accentRed,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        )),
+      ],
+    );
+  }
+
+  void _startSimulation(SimulationState simState) {
+    final apiClient = context.read<ApiClient>();
+
+    // Build knob overrides from current knob state
+    final overrides = KnobOverrides(
+      disposableIncomeDelta: _knobs
+          .firstWhere((k) => k.type == UniversalKnobType.disposableIncomeDelta)
+          .value,
+      operationalExpenseIndex: _knobs
+          .firstWhere((k) => k.type == UniversalKnobType.operationalExpenseIndex)
+          .value,
+      capitalAccessPressure: _knobs
+          .firstWhere((k) => k.type == UniversalKnobType.capitalAccessPressure)
+          .value,
+      systemicFriction: _knobs
+          .firstWhere((k) => k.type == UniversalKnobType.systemicFriction)
+          .value,
+      socialEquityWeight: _knobs
+          .firstWhere((k) => k.type == UniversalKnobType.socialEquityWeight)
+          .value,
+      systemicTrustBaseline: _knobs
+          .firstWhere((k) => k.type == UniversalKnobType.systemicTrustBaseline)
+          .value,
+      futureMobilityIndex: _knobs
+          .firstWhere((k) => k.type == UniversalKnobType.futureMobilityIndex)
+          .value,
+      ecologicalPressure: _knobs
+          .firstWhere((k) => k.type == UniversalKnobType.ecologicalResourcePressure)
+          .value,
+    );
+
+    final request = SimulateRequest(
+      policyText: simState.policyText,
+      simulationTicks: _simTicks,
+      agentCount: _agentCount,
+      knobOverrides: _overrideActive ? overrides : const KnobOverrides(),
+    );
+
+    simState.setSimulating(true);
+
+    apiClient.simulateStream(request).listen(
+      (event) {
+        if (event.type == 'tick') {
+          try {
+            simState.addTick(TickSummary.fromJson(event.data));
+          } catch (e) {
+            debugPrint('Tick parse error: $e');
+          }
+        } else if (event.type == 'complete') {
+          try {
+            simState.setFinalResult(SimulateResponse.fromJson(event.data));
+          } catch (e) {
+            debugPrint('Complete parse error: $e');
+          }
+          simState.setSimulating(false);
+        } else if (event.type == 'error') {
+          simState.setSimulationError(
+            event.data['detail'] as String? ?? 'Unknown error',
+          );
+          simState.setSimulating(false);
+        }
+      },
+      onError: (Object e) {
+        simState.setSimulationError(e.toString());
+        simState.setSimulating(false);
+      },
+      onDone: () {
+        if (simState.isSimulating) simState.setSimulating(false);
+      },
     );
   }
 
