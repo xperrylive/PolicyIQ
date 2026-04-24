@@ -26,8 +26,7 @@ import random
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
-import vertexai
-from vertexai.generative_models import GenerativeModel, GenerationConfig
+from groq import Groq
 
 from backend.ai_engine.physics import GlobalStateEngine
 
@@ -113,22 +112,35 @@ def _cached_local_search(
     
     # Path: backend/data/*.jsonl
     data_dir = Path(__file__).parent.parent / "data"
+    # Resolve to absolute path to avoid Windows escape-character issues
+    data_dir = data_dir.resolve()
     results = []
-    
-    if data_dir.exists():
-        for file_path in data_dir.glob("*.jsonl"):
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line_lower = line.lower()
-                        if any(kw.lower() in line_lower for kw in keywords):
-                            results.append(line.strip())
-                            if len(results) >= 10:
-                                break
-            except Exception as e:
-                _log.error("Error reading %s: %s", file_path, e)
-            if len(results) >= 10:
-                break
+
+    if not data_dir.exists():
+        _log.error(
+            "[RAG PATH ERROR] Data directory not found: %s — "
+            "ensure backend/data/*.jsonl files are present at this path.",
+            data_dir,
+        )
+        print(
+            f"[RAG PATH ERROR] Data directory not found: {data_dir}\n"
+            "Please ensure the backend/data/ folder exists and contains .jsonl files."
+        )
+        return ""
+
+    for file_path in data_dir.glob("*.jsonl"):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line_lower = line.lower()
+                    if any(kw.lower() in line_lower for kw in keywords):
+                        results.append(line.strip())
+                        if len(results) >= 10:
+                            break
+        except Exception as e:
+            _log.error("Error reading %s: %s", file_path, e)
+        if len(results) >= 10:
+            break
 
     if not results:
         _log.warning("[WARNING] No RAG snippets found locally. RAG Query sent: %s", query)
@@ -241,22 +253,9 @@ class Orchestrator:
         self._decomposition: Optional[dict] = None
         self._tick_results: list[dict] = []
         self._agents: list[dict] = []
-        self._gemini_model: str     = os.getenv("GEMINI_MODEL",     "gemini-1.5-flash")
-        self._gemini_pro_model: str = os.getenv("GEMINI_PRO_MODEL", "gemini-1.5-pro")
-
-        # ── Vertex AI SDK initialisation ──────────────────────────────────────
-        _project  = os.getenv("GOOGLE_CLOUD_PROJECT", "")
-        ai_loc = os.getenv("VERTEX_AI_LOCATION", "global")
-
-        if _project:
-            vertexai.init(project=_project, location=ai_loc)
-            logger.info(
-                "Vertex AI initialised │ project=%s │ location=%s", _project, ai_loc
-            )
-        else:
-            logger.warning(
-                "GOOGLE_CLOUD_PROJECT is not set — Vertex AI calls will fail at runtime."
-            )
+        self._groq_model: str = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+        self._groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        logger.info("Orchestrator initialized with Groq model: %s", self._groq_model)
 
 
     # ─── RAG Truth Layer ──────────────────────────────────────────────────────
@@ -437,14 +436,22 @@ class Orchestrator:
     def _clean_json_text(self, text: str) -> str:
         """
         Aggressively cleans string to extract JSON payload.
-        Uses a regex to find the FIRST { and the LAST } and throw away everything else.
-        Removes trailing commas before closing braces.
+        1. Strips Markdown code fences (```json ... ``` or ``` ... ```).
+        2. Finds the FIRST '{' and the LAST '}' and discards everything outside.
+        3. Removes trailing commas before closing braces/brackets.
         """
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            text = match.group(0)
-        text = re.sub(r'(\w+)\s*:', r'"\1":', text)
-        text = re.sub(r',\s*\}', '}', text)
+        # Strip markdown code fences
+        text = re.sub(r'```(?:json)?\s*', '', text)
+        text = text.replace('```', '').strip()
+
+        # Extract the outermost JSON object
+        start = text.find('{')
+        end = text.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            text = text[start:end + 1]
+
+        # Remove trailing commas before closing braces/brackets
+        text = re.sub(r',\s*([\}\]])', r'\1', text)
         return text
 
     # ─── Gatekeeper ───────────────────────────────────────────────────────────
@@ -472,18 +479,22 @@ class Orchestrator:
         final_prompt = gatekeeper_prompt.replace("{{policy_text}}", text)
 
         try:
-            # ── Gemini 1.5 Flash call ─────────────────────────────────────────
-            model = GenerativeModel(self._gemini_model)
-            response = model.generate_content(
-                final_prompt,
-                generation_config=GenerationConfig(
-                    response_mime_type="application/json",
-                    temperature=0.1,   # near-deterministic for a validation gate
-                    max_output_tokens=512,
+            # ── Groq call ─────────────────────────────────────────────────────
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: self._groq_client.chat.completions.create(
+                    model=self._groq_model,
+                    messages=[
+                        {"role": "system", "content": "You are a policy analyst. Respond with valid JSON only."},
+                        {"role": "user", "content": final_prompt},
+                    ],
+                    temperature=0.1,
+                    max_tokens=2048,
+                    response_format={"type": "json_object"},
                 ),
             )
-
-            raw_text = response.text.strip()
+            raw_text = response.choices[0].message.content.strip()
             logger.info("Gatekeeper raw response: %s", raw_text[:300])
 
             # ── Parse and validate the JSON against our Pydantic schema ───────
@@ -580,127 +591,145 @@ class Orchestrator:
             overrides_text = "No manual overrides — determine all knob values from the policy text."
         final_prompt = final_prompt.replace("{{knob_overrides}}", overrides_text)
 
-        try:
-            # ── 2. Call Gemini 1.5 Flash with strict JSON output ──────────────
-            model = GenerativeModel(self._gemini_model)
-            response = model.generate_content(
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # ── 2. Call Groq with JSON output ─────────────────────────────
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self._groq_client.chat.completions.create(
+                        model=self._groq_model,
+                        messages=[
+                            {"role": "system", "content": "You are a policy decomposition engine. Respond with valid JSON only."},
+                            {"role": "user", "content": final_prompt},
+                        ],
+                        temperature=0.2,
+                        max_tokens=2048,
+                        response_format={"type": "json_object"},
+                    ),
+                )
+                raw_text = response.choices[0].message.content.strip()
+                logger.info("Decomposition raw response (first 500 chars): %s", raw_text[:500])
 
-                final_prompt,
-                generation_config=GenerationConfig(
-                    response_mime_type="application/json",
-                    temperature=0.2,        # low temperature — deterministic mapping
-                    max_output_tokens=1024,
-                ),
-            )
+                # ── 3. Parse JSON ─────────────────────────────────────────────
+                payload = json.loads(self._clean_json_text(raw_text))
 
-            raw_text = response.text.strip()
-            logger.info("Decomposition raw response (first 500 chars): %s", raw_text[:500])
-
-            # ── 3. Parse JSON ─────────────────────────────────────────────────
-            payload = json.loads(self._clean_json_text(raw_text))
-
-            # ── 4. Per-knob 0.0 fallback safety ──────────────────────────────
-            # Gemini sometimes omits knobs it considers "not affected". We
-            # default those to 0.0 so the physics engine never receives KeyError.
-            raw_global_state: dict = payload.get("global_state", {})
-            safe_global_state: dict[str, float] = {}
-            for knob in self._KNOB_NAMES:
-                raw_val = raw_global_state.get(knob, 0.0)
-                # Normalise percentage strings → float (e.g. "10%" → 0.10)
-                if isinstance(raw_val, str) and raw_val.endswith("%"):
+                # ── 4. Per-knob 0.0 fallback safety ──────────────────────────
+                # Gemini sometimes omits knobs it considers "not affected". We
+                # default those to 0.0 so the physics engine never receives KeyError.
+                raw_global_state: dict = payload.get("global_state", {})
+                safe_global_state: dict[str, float] = {}
+                for knob in self._KNOB_NAMES:
+                    raw_val = raw_global_state.get(knob, 0.0)
+                    # Normalise percentage strings → float (e.g. "10%" → 0.10)
+                    if isinstance(raw_val, str) and raw_val.endswith("%"):
+                        try:
+                            raw_val = float(raw_val.rstrip("%")) / 100.0
+                        except ValueError:
+                            logger.warning(
+                                "Could not parse percentage string '%s' for knob '%s'; defaulting to 0.0.",
+                                raw_val, knob,
+                            )
+                            raw_val = 0.0
+                    # Clamp to [-1.0, 1.0]
                     try:
-                        raw_val = float(raw_val.rstrip("%")) / 100.0
-                    except ValueError:
+                        safe_global_state[knob] = max(-1.0, min(1.0, float(raw_val)))
+                    except (TypeError, ValueError):
                         logger.warning(
-                            "Could not parse percentage string '%s' for knob '%s'; defaulting to 0.0.",
+                            "Non-numeric value '%s' for knob '%s'; defaulting to 0.0.",
                             raw_val, knob,
                         )
-                        raw_val = 0.0
-                # Clamp to [-1.0, 1.0]
-                try:
-                    safe_global_state[knob] = max(-1.0, min(1.0, float(raw_val)))
-                except (TypeError, ValueError):
+                        safe_global_state[knob] = 0.0
+
+                payload["global_state"] = safe_global_state
+
+                # ── 5. Sub-layer count enforcement ────────────────────────────
+                sub_layers: list = payload.get("dynamic_sub_layers", [])
+                while len(sub_layers) < 3:
                     logger.warning(
-                        "Non-numeric value '%s' for knob '%s'; defaulting to 0.0.",
-                        raw_val, knob,
+                        "Gemini returned only %d sub-layer(s); padding to 3.", len(sub_layers)
                     )
-                    safe_global_state[knob] = 0.0
-
-            payload["global_state"] = safe_global_state
-
-            # ── 5. Sub-layer count enforcement ────────────────────────────────
-            sub_layers: list = payload.get("dynamic_sub_layers", [])
-            while len(sub_layers) < 3:
-                logger.warning(
-                    "Gemini returned only %d sub-layer(s); padding to 3.", len(sub_layers)
-                )
-                sub_layers.append({
-                    "parent_knob": "disposable_income_delta",
-                    "sub_layer_name": "General Policy Effect",
-                    "target_demographic": ["B40", "M40"],
-                    "impact_multiplier": 0.0,
-                    "description": "Neutral placeholder sub-layer (AI did not provide enough detail).",
-                })
-            payload["dynamic_sub_layers"] = sub_layers[:5]  # enforce max 5
-
-            # Ensure policy_summary is present
-            if not payload.get("policy_summary"):
-                payload["policy_summary"] = policy_text[:120]
-
-            # ── 6. Validate against the Pydantic schema ───────────────────────
-            decomposition = PolicyDecomposition(**payload)
-            logger.info(
-                "Decomposition validated ✓ │ knobs=%s │ sub_layers=%d",
-                safe_global_state,
-                len(decomposition.dynamic_sub_layers),
-            )
-
-            # ── 7. Store in current_state (self._physics.knob_state) ──────────
-            # Write the AI-determined knob values directly into the physics
-            # engine so that advance_tick() starts from the correct baseline.
-            for knob, value in safe_global_state.items():
-                if hasattr(self._physics.knob_state, knob):
-                    setattr(self._physics.knob_state, knob, value)
-            self._physics.knob_state.clamp()
-            logger.info(
-                "GlobalState written to physics engine │ current_state=%s",
-                self._physics.knob_state.to_dict(),
-            )
-
-            return decomposition.model_dump()
-
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(
-                "Policy Decomposer Gemini call failed — degrading to safe defaults: %s", exc
-            )
-            # ── Safe fallback: return neutral decomposition, never crash ───────
-            return {
-                "policy_summary": policy_text[:120],
-                "global_state": {knob: 0.0 for knob in self._KNOB_NAMES},
-                "dynamic_sub_layers": [
-                    {
+                    sub_layers.append({
                         "parent_knob": "disposable_income_delta",
-                        "sub_layer_name": "Fallback — Direct Effect",
-                        "target_demographic": ["B40"],
-                        "impact_multiplier": 0.0,
-                        "description": "Decomposition service unavailable; using neutral baseline.",
-                    },
-                    {
-                        "parent_knob": "systemic_friction",
-                        "sub_layer_name": "Fallback — Friction Baseline",
+                        "sub_layer_name": "General Policy Effect",
                         "target_demographic": ["B40", "M40"],
                         "impact_multiplier": 0.0,
-                        "description": "Neutral placeholder while decomposition recovers.",
-                    },
-                    {
-                        "parent_knob": "social_equity_weight",
-                        "sub_layer_name": "Fallback — Equity Baseline",
-                        "target_demographic": ["B40", "M40", "T20"],
-                        "impact_multiplier": 0.0,
-                        "description": "Neutral placeholder while decomposition recovers.",
-                    },
-                ],
-            }
+                        "description": "Neutral placeholder sub-layer (AI did not provide enough detail).",
+                    })
+                payload["dynamic_sub_layers"] = sub_layers[:5]  # enforce max 5
+
+                # Ensure policy_summary is present
+                if not payload.get("policy_summary"):
+                    payload["policy_summary"] = policy_text[:120]
+
+                # ── 6. Validate against the Pydantic schema ───────────────────
+                decomposition = PolicyDecomposition(**payload)
+                logger.info(
+                    "Decomposition validated ✓ │ knobs=%s │ sub_layers=%d",
+                    safe_global_state,
+                    len(decomposition.dynamic_sub_layers),
+                )
+
+                # ── 7. Store in current_state (self._physics.knob_state) ──────
+                # Write the AI-determined knob values directly into the physics
+                # engine so that advance_tick() starts from the correct baseline.
+                for knob, value in safe_global_state.items():
+                    if hasattr(self._physics.knob_state, knob):
+                        setattr(self._physics.knob_state, knob, value)
+                self._physics.knob_state.clamp()
+                logger.info(
+                    "GlobalState written to physics engine │ current_state=%s",
+                    self._physics.knob_state.to_dict(),
+                )
+
+                return decomposition.model_dump()
+
+            except Exception as exc:  # noqa: BLE001
+                if attempt < max_retries - 1:
+                    backoff = (2 ** attempt) + random.uniform(0.1, 0.5)
+                    logger.warning(
+                        "Decomposition attempt %d/%d failed, retrying in %.2fs… Error: %s",
+                        attempt + 1, max_retries, backoff, exc,
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                logger.exception(
+                    "Policy Decomposer failed after %d retries — returning Safe Default: %s",
+                    max_retries, exc,
+                )
+
+        # ── Safe Default: returned after all retries exhausted ────────────────
+        # Follows the expected PolicyDecomposition schema so the simulation
+        # can proceed with neutral (no-change) knob values.
+        logger.warning("_decompose_policy: returning hardcoded Safe Default dictionary.")
+        return {
+            "policy_summary": policy_text[:120],
+            "global_state": {knob: 0.0 for knob in self._KNOB_NAMES},
+            "dynamic_sub_layers": [
+                {
+                    "parent_knob": "disposable_income_delta",
+                    "sub_layer_name": "Safe Default — Direct Effect",
+                    "target_demographic": ["B40"],
+                    "impact_multiplier": 0.0,
+                    "description": "Decomposition service unavailable; using neutral baseline.",
+                },
+                {
+                    "parent_knob": "systemic_friction",
+                    "sub_layer_name": "Safe Default — Friction Baseline",
+                    "target_demographic": ["B40", "M40"],
+                    "impact_multiplier": 0.0,
+                    "description": "Neutral placeholder while decomposition recovers.",
+                },
+                {
+                    "parent_knob": "social_equity_weight",
+                    "sub_layer_name": "Safe Default — Equity Baseline",
+                    "target_demographic": ["B40", "M40", "T20"],
+                    "impact_multiplier": 0.0,
+                    "description": "Neutral placeholder while decomposition recovers.",
+                },
+            ],
+        }
 
     # ─── Agent Observation Generation ────────────────────────────────────────
 
@@ -830,47 +859,32 @@ class Orchestrator:
             f"{grounded_context}"
         )
 
-        # ── Gemini 1.5 Flash call (rate-limited via semaphore) ────────────────
+        # ── Staggered start: spread agent API calls to avoid 429 bursts ─────────
+        # Each agent waits a random 0.1–2.0 s before acquiring the semaphore so
+        # 50 agents don't all hit the Vertex AI gate at the exact same millisecond.
+        await asyncio.sleep(random.uniform(0.1, 2.0))
+
+        # ── Groq call (rate-limited via semaphore) ────────────────────────────
         max_retries = 3
         for attempt in range(max_retries):
-            try:
-                model = GenerativeModel(self._gemini_model)
-
-                response_schema = {
-                    "type": "OBJECT",
-                    "properties": {
-                        "sentiment_score": {"type": "NUMBER"},
-                        "financial_health_change": {"type": "NUMBER"},
-                        "internal_monologue": {"type": "STRING"},
-                        "action_taken": {"type": "STRING"},
-                        "is_breaking_point": {"type": "BOOLEAN"},
-                        "exploiting_loophole": {"type": "BOOLEAN"}
-                    },
-                    "required": [
-                        "sentiment_score", "financial_health_change", "internal_monologue",
-                        "action_taken", "is_breaking_point", "exploiting_loophole"
-                    ]
-                }
-
+            try:                # Semaphore wraps ONLY the model call to maximise throughput
                 async with Orchestrator.semaphore:
-                    # GenerativeModel.generate_content is synchronous in the
-                    # vertexai SDK — run it in a thread so we don't block the
-                    # event loop and truly parallelise via asyncio.gather.
                     loop = asyncio.get_event_loop()
                     response = await loop.run_in_executor(
                         None,
-                        lambda: model.generate_content(
-                            filled_prompt,
-                            generation_config=GenerationConfig(
-                                response_mime_type="application/json",
-                                response_schema=response_schema,
-                                temperature=0.1,
-                                max_output_tokens=1024,
-                            ),
+                        lambda: self._groq_client.chat.completions.create(
+                            model=self._groq_model,
+                            messages=[
+                                {"role": "system", "content": "You are simulating a Malaysian citizen's economic response. Respond with valid JSON only."},
+                                {"role": "user", "content": filled_prompt},
+                            ],
+                            temperature=0.1,
+                            max_tokens=2048,
+                            response_format={"type": "json_object"},
                         ),
                     )
 
-                raw_text = response.text.strip()
+                raw_text = response.choices[0].message.content.strip()
                 logger.debug("Agent %s raw response: %s", agent_id, raw_text[:300])
 
                 try:
@@ -1037,20 +1051,19 @@ class Orchestrator:
             try:
                 async with Orchestrator.semaphore:
                     loop = asyncio.get_event_loop()
-                    model = GenerativeModel(self._gemini_model)
-
                     response = await loop.run_in_executor(
                         None,
-                        lambda: model.generate_content(
-                            summary_prompt,
-                            generation_config=GenerationConfig(
-                                temperature=0.3,
-                                max_output_tokens=1024,
-                            ),
+                        lambda: self._groq_client.chat.completions.create(
+                            model=self._groq_model,
+                            messages=[
+                                {"role": "system", "content": "You are the Malaysian Chief Economist. Be concise and authoritative."},
+                                {"role": "user", "content": summary_prompt},
+                            ],
+                            temperature=0.3,
+                            max_tokens=1024,
                         ),
                     )
-
-                    summary_text = response.text.strip()
+                    summary_text = response.choices[0].message.content.strip()
                     logger.info(
                         "generate_summary ✓ │ length=%d chars", len(summary_text)
                     )

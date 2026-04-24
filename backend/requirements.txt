@@ -9,3 +9,4 @@ sse-starlette
 python-dotenv
 genkit
 genkit[google-genai]
+groq
