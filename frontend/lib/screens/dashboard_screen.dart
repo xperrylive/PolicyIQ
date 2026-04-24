@@ -1,16 +1,18 @@
-// dashboard.dart — PolicyIQ MARL Dashboard
+// dashboard_screen.dart — PolicyIQ MARL Dashboard (State-Driven Refactor)
 //
-// Displays:
-//   - Digital Malaysian Feed: per-demographic agent_actions + avg_reward_score
-//   - Stability Gauge: color-coded by reward_stability_score (0–100)
-//   - Stress Test Line Chart: reward_stability vs time, turns red below 40
-//   - Scenario Comparison: overlay Scenario A vs B stability charts
+// 3-Column Layout:
+// - Column 1: The Agents (50-agent population feed with actions + rewards)
+// - Column 2: The Math (Reward Stability Score line chart, triggers SOCIAL UNREST if < 40)
+// - Column 3: The Macro (8 Knobs shifting in real-time via Recession Spiral)
+//
+// A/B Comparison: Ghost line overlay for saved scenarios
 
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../services/api_client.dart';
+import '../state/simulation_state.dart';
 import '../models/contracts.dart';
 import '../theme/app_theme.dart';
 
@@ -20,8 +22,12 @@ class DashboardScreen extends StatelessWidget {
   Future<void> _runSimulation(BuildContext context) async {
     final state = context.read<SimulationState>();
     final client = context.read<ApiClient>();
+    
     if (state.policyText.isEmpty) return;
-    state.setSimulating(true);
+    if (state.status != SimulationStatus.readyToReview && 
+        state.status != SimulationStatus.completed) return;
+    
+    state.setSimulating();
 
     final request = SimulateRequest(
       policyText: state.policyText,
@@ -36,14 +42,14 @@ class DashboardScreen extends StatelessWidget {
           case 'tick':
             state.addTick(TickSummary.fromJson(event.data));
           case 'complete':
-            state.setFinalResult(SimulateResponse.fromJson(event.data));
+            state.setSimulationComplete(SimulateResponse.fromJson(event.data));
           case 'error':
-            state.setSimulationError(
+            state.setSimulationFailed(
                 event.data['detail']?.toString() ?? 'Unknown error');
         }
       }
     } catch (e) {
-      state.setSimulationError(e.toString());
+      state.setSimulationFailed(e.toString());
     }
   }
 
@@ -124,7 +130,8 @@ class DashboardScreen extends StatelessWidget {
         children: [
           _buildHeader(context, state),
           Expanded(
-            child: state.ticks.isEmpty && !state.isSimulating
+            child: state.status == SimulationStatus.idle ||
+                    state.status == SimulationStatus.validating
                 ? _buildEmptyState(state)
                 : _buildMainContent(context, state),
           ),
@@ -137,6 +144,9 @@ class DashboardScreen extends StatelessWidget {
     final latestStability = state.rewardStabilityHistory.isNotEmpty
         ? state.rewardStabilityHistory.last
         : null;
+
+    final canRun = state.status == SimulationStatus.readyToReview ||
+        state.status == SimulationStatus.completed;
 
     return Container(
       padding: const EdgeInsets.fromLTRB(24, 16, 24, 12),
@@ -162,13 +172,13 @@ class DashboardScreen extends StatelessWidget {
           const Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('DIGITAL MALAYSIAN FEED',
+              Text('LIVE DASHBOARD',
                   style: TextStyle(
                       fontFamily: 'SpaceMono',
                       fontSize: 16,
                       fontWeight: FontWeight.w700,
                       color: AppTheme.textPrimary)),
-              Text('MARL Agent Reward Dashboard',
+              Text('MARL Agent Reward Monitor',
                   style: TextStyle(
                       fontFamily: 'SpaceMono',
                       fontSize: 10,
@@ -179,8 +189,7 @@ class DashboardScreen extends StatelessWidget {
           if (latestStability != null)
             _StabilityGaugeBadge(score: latestStability),
           const SizedBox(width: 12),
-          // ── Save Scenario button (shown when simulation is complete) ────────
-          if (state.finalResult != null && !state.isSimulating) ...[
+          if (state.status == SimulationStatus.completed) ...[
             OutlinedButton.icon(
               onPressed: () => _showSaveScenarioDialog(context),
               icon: const Icon(Icons.bookmark_add_outlined, size: 14),
@@ -201,13 +210,13 @@ class DashboardScreen extends StatelessWidget {
             ),
             const SizedBox(width: 8),
           ],
-          if (state.isSimulating)
+          if (state.status == SimulationStatus.simulating)
             const SizedBox(
                 width: 18,
                 height: 18,
                 child: CircularProgressIndicator(
                     strokeWidth: 2, color: AppTheme.accentCyan)),
-          if (!state.isSimulating && state.isPolicyApproved)
+          if (canRun)
             ElevatedButton.icon(
               onPressed: () => _runSimulation(context),
               icon: const Icon(Icons.play_arrow_rounded, size: 16),
@@ -226,10 +235,9 @@ class DashboardScreen extends StatelessWidget {
                     borderRadius: BorderRadius.circular(6)),
               ),
             ),
-          if (!state.isPolicyApproved && !state.isSimulating)
+          if (!canRun && state.status != SimulationStatus.simulating)
             Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
                 color: AppTheme.accentAmber.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(4),
@@ -264,7 +272,7 @@ class DashboardScreen extends StatelessWidget {
                   color: AppTheme.textMuted)),
           const SizedBox(height: 8),
           Text(
-            state.isPolicyApproved
+            state.status == SimulationStatus.readyToReview
                 ? 'Click RUN SIMULATION to start the MARL loop'
                 : 'Validate a policy in the Gatekeeper tab first',
             style: const TextStyle(
@@ -295,116 +303,280 @@ class DashboardScreen extends StatelessWidget {
   }
 
   Widget _buildMainContent(BuildContext context, SimulationState state) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // ── Scenario Comparison Selector ────────────────────────────────
-          if (state.savedScenarios.isNotEmpty) ...[
-            _ScenarioComparisonBar(state: state),
-            const SizedBox(height: 16),
-          ],
-          // ── Stress Test Line Chart (with optional overlay) ──────────────
-          if (state.rewardStabilityHistory.isNotEmpty) ...[
-            _StressTestChart(
-              history: state.rewardStabilityHistory,
-              comparisonScenario: state.comparisonScenario,
-            ),
-            const SizedBox(height: 20),
-          ],
-          // ── Digital Malaysian Feed (latest tick) ────────────────────────
-          if (state.ticks.isNotEmpty) ...[
-            _DigitalMalaysianFeed(ticks: state.ticks),
-            const SizedBox(height: 20),
-          ],
-          // ── Macro summary ───────────────────────────────────────────────
-          if (state.finalResult != null) ...[
-            _MacroSummaryCard(result: state.finalResult!),
-            const SizedBox(height: 20),
-          ],
-          // ── AI Recommendation ───────────────────────────────────────────
-          if (state.finalResult?.aiPolicyRecommendation.isNotEmpty == true)
-            _RecommendationCard(
-                text: state.finalResult!.aiPolicyRecommendation),
-        ],
-      ),
+    return Row(
+      children: [
+        // Column 1: The Agents
+        Expanded(
+          flex: 2,
+          child: _AgentColumn(state: state),
+        ),
+        // Column 2: The Math
+        Expanded(
+          flex: 2,
+          child: _MathColumn(state: state),
+        ),
+        // Column 3: The Macro
+        Expanded(
+          flex: 2,
+          child: _MacroColumn(state: state),
+        ),
+      ],
     );
   }
 }
 
-// ─── Scenario Comparison Bar ──────────────────────────────────────────────────
+// ─── Column 1: The Agents ─────────────────────────────────────────────────────
 
-class _ScenarioComparisonBar extends StatelessWidget {
+class _AgentColumn extends StatelessWidget {
   final SimulationState state;
 
-  const _ScenarioComparisonBar({required this.state});
+  const _AgentColumn({required this.state});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(12),
+      decoration: const BoxDecoration(
+        border: Border(right: BorderSide(color: AppTheme.border)),
+      ),
+      child: Column(
+        children: [
+          _buildColumnHeader('THE AGENTS', Icons.people_alt, AppTheme.accentCyan),
+          Expanded(
+            child: state.ticks.isEmpty
+                ? const Center(
+                    child: Text('Waiting for simulation ticks...',
+                        style: TextStyle(
+                            fontFamily: 'SpaceMono',
+                            fontSize: 11,
+                            color: AppTheme.textMuted)))
+                : ListView.builder(
+                    padding: const EdgeInsets.all(16),
+                    itemCount: state.ticks.length,
+                    reverse: true,
+                    itemBuilder: (context, index) {
+                      final tick = state.ticks[state.ticks.length - 1 - index];
+                      return _AgentTickCard(tick: tick);
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildColumnHeader(String label, IconData icon, Color color) {
+    return Container(
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: AppTheme.accentPurple.withValues(alpha: 0.05),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: AppTheme.accentPurple.withValues(alpha: 0.25)),
+        color: color.withValues(alpha: 0.05),
+        border: Border(bottom: BorderSide(color: color.withValues(alpha: 0.2))),
       ),
       child: Row(
         children: [
-          const Icon(Icons.compare_arrows_rounded,
-              size: 14, color: AppTheme.accentPurple),
+          Icon(icon, size: 16, color: color),
           const SizedBox(width: 8),
-          const Text('COMPARE WITH:',
+          Text(label,
               style: TextStyle(
                   fontFamily: 'SpaceMono',
-                  fontSize: 10,
+                  fontSize: 12,
                   fontWeight: FontWeight.w700,
-                  color: AppTheme.accentPurple)),
-          const SizedBox(width: 12),
-          Expanded(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
+                  color: color,
+                  letterSpacing: 1)),
+        ],
+      ),
+    );
+  }
+}
+
+class _AgentTickCard extends StatelessWidget {
+  final TickSummary tick;
+
+  const _AgentTickCard({required this.tick});
+
+  @override
+  Widget build(BuildContext context) {
+    const demos = ['B40', 'M40', 'T20'];
+    final demoColors = {
+      'B40': AppTheme.accentRed,
+      'M40': AppTheme.accentAmber,
+      'T20': AppTheme.accentGreen,
+    };
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppTheme.surface,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: AppTheme.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text('TICK ${tick.tickId}',
+                  style: const TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      color: AppTheme.accentCyan)),
+              const Spacer(),
+              Text('avg: ${tick.averageSentiment.toStringAsFixed(3)}',
+                  style: const TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 9,
+                      color: AppTheme.textMuted)),
+            ],
+          ),
+          const SizedBox(height: 10),
+          ...demos.map((demo) {
+            final color = demoColors[demo]!;
+            final reward = tick.averageRewardScore[demo];
+            final action = tick.demoActionSummary[demo] ?? '—';
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 8),
               child: Row(
                 children: [
-                  // "None" chip
-                  _ScenarioChip(
-                    label: 'None',
-                    isSelected: state.comparisonScenarioId == null,
-                    color: AppTheme.textMuted,
-                    onTap: () => state.setComparisonScenario(null),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                    child: Text(demo,
+                        style: TextStyle(
+                            fontFamily: 'SpaceMono',
+                            fontSize: 9,
+                            fontWeight: FontWeight.w700,
+                            color: color)),
                   ),
-                  const SizedBox(width: 6),
-                  ...state.savedScenarios.map((s) => Padding(
-                        padding: const EdgeInsets.only(right: 6),
-                        child: _ScenarioChip(
-                          label: s.label,
-                          isSelected: state.comparisonScenarioId == s.id,
-                          color: AppTheme.accentCyan,
-                          onTap: () => state.setComparisonScenario(s.id),
-                        ),
-                      )),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(_humanizeAction(action),
+                        style: const TextStyle(
+                            fontFamily: 'SpaceMono',
+                            fontSize: 9,
+                            color: AppTheme.textSecondary),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis),
+                  ),
+                  if (reward != null)
+                    Text(
+                      reward >= 0
+                          ? '+${reward.toStringAsFixed(2)}'
+                          : reward.toStringAsFixed(2),
+                      style: TextStyle(
+                          fontFamily: 'SpaceMono',
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700,
+                          color: reward >= 0
+                              ? AppTheme.accentGreen
+                              : AppTheme.accentRed),
+                    ),
+                ],
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  String _humanizeAction(String raw) {
+    return raw
+        .replaceAll("'", '')
+        .replaceAll('_', ' ')
+        .split(' ')
+        .map((w) =>
+            w.isNotEmpty ? '${w[0].toUpperCase()}${w.substring(1)}' : w)
+        .join(' ');
+  }
+}
+
+// ─── Column 2: The Math ───────────────────────────────────────────────────────
+
+class _MathColumn extends StatelessWidget {
+  final SimulationState state;
+
+  const _MathColumn({required this.state});
+
+  @override
+  Widget build(BuildContext context) {
+    final isInUnrest = state.rewardStabilityHistory.isNotEmpty &&
+        state.rewardStabilityHistory.last < 40;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: isInUnrest
+            ? AppTheme.accentRed.withValues(alpha: 0.03)
+            : AppTheme.background,
+        border: const Border(right: BorderSide(color: AppTheme.border)),
+      ),
+      child: Column(
+        children: [
+          _buildColumnHeader('THE MATH', Icons.functions, AppTheme.accentAmber,
+              isUnrest: isInUnrest),
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  if (state.savedScenarios.isNotEmpty)
+                    _ScenarioComparisonBar(state: state),
+                  const SizedBox(height: 16),
+                  if (state.rewardStabilityHistory.isNotEmpty)
+                    _StressTestChart(
+                      history: state.rewardStabilityHistory,
+                      comparisonScenario: state.comparisonScenario,
+                    ),
+                  if (state.finalResult != null) ...[
+                    const SizedBox(height: 20),
+                    _MacroSummaryCard(result: state.finalResult!),
+                  ],
                 ],
               ),
             ),
           ),
-          // Refine & Re-run button (shown when a scenario is selected)
-          if (state.comparisonScenario != null) ...[
-            const SizedBox(width: 8),
-            TextButton.icon(
-              onPressed: () =>
-                  state.refineFromScenario(state.comparisonScenario!),
-              icon: const Icon(Icons.edit_note_rounded, size: 14),
-              label: const Text('REFINE & RE-RUN',
-                  style: TextStyle(
-                      fontFamily: 'SpaceMono',
-                      fontSize: 9,
-                      fontWeight: FontWeight.w700)),
-              style: TextButton.styleFrom(
-                foregroundColor: AppTheme.accentAmber,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              ),
-            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildColumnHeader(String label, IconData icon, Color color,
+      {bool isUnrest = false}) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: isUnrest
+            ? AppTheme.accentRed.withValues(alpha: 0.1)
+            : color.withValues(alpha: 0.05),
+        border: Border(
+            bottom: BorderSide(
+                color: isUnrest
+                    ? AppTheme.accentRed.withValues(alpha: 0.4)
+                    : color.withValues(alpha: 0.2))),
+      ),
+      child: Row(
+        children: [
+          Icon(icon,
+              size: 16, color: isUnrest ? AppTheme.accentRed : color),
+          const SizedBox(width: 8),
+          Text(label,
+              style: TextStyle(
+                  fontFamily: 'SpaceMono',
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: isUnrest ? AppTheme.accentRed : color,
+                  letterSpacing: 1)),
+          if (isUnrest) ...[
+            const Spacer(),
+            const Text('⚠ SOCIAL UNREST',
+                style: TextStyle(
+                    fontFamily: 'SpaceMono',
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    color: AppTheme.accentRed)),
           ],
         ],
       ),
@@ -412,49 +584,129 @@ class _ScenarioComparisonBar extends StatelessWidget {
   }
 }
 
-class _ScenarioChip extends StatelessWidget {
-  final String label;
-  final bool isSelected;
-  final Color color;
-  final VoidCallback onTap;
+// ─── Column 3: The Macro ──────────────────────────────────────────────────────
 
-  const _ScenarioChip({
-    required this.label,
-    required this.isSelected,
-    required this.color,
-    required this.onTap,
-  });
+class _MacroColumn extends StatelessWidget {
+  final SimulationState state;
+
+  const _MacroColumn({required this.state});
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(
-          color: isSelected ? color.withValues(alpha: 0.15) : Colors.transparent,
-          borderRadius: BorderRadius.circular(4),
-          border: Border.all(
-              color: isSelected
-                  ? color.withValues(alpha: 0.6)
-                  : AppTheme.border),
+    return Column(
+      children: [
+        _buildColumnHeader('THE MACRO', Icons.trending_up, AppTheme.accentGreen),
+        Expanded(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('8 KNOBS - RECESSION SPIRAL LOGIC',
+                    style: TextStyle(
+                        fontFamily: 'SpaceMono',
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: AppTheme.textMuted,
+                        letterSpacing: 0.8)),
+                const SizedBox(height: 12),
+                const Text(
+                    'Knob(t+1) = Knob(t) × (1 + macro_delta)',
+                    style: TextStyle(
+                        fontFamily: 'SpaceMono',
+                        fontSize: 9,
+                        color: AppTheme.textSecondary,
+                        fontStyle: FontStyle.italic)),
+                const SizedBox(height: 16),
+                _buildKnobList(),
+              ],
+            ),
+          ),
         ),
-        child: Text(label,
-            style: TextStyle(
-                fontFamily: 'SpaceMono',
-                fontSize: 10,
-                fontWeight:
-                    isSelected ? FontWeight.w700 : FontWeight.normal,
-                color: isSelected ? color : AppTheme.textMuted)),
+      ],
+    );
+  }
+
+  Widget _buildColumnHeader(String label, IconData icon, Color color) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.05),
+        border: Border(bottom: BorderSide(color: color.withValues(alpha: 0.2))),
       ),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 8),
+          Text(label,
+              style: TextStyle(
+                  fontFamily: 'SpaceMono',
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: color,
+                  letterSpacing: 1)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildKnobList() {
+    final knobs = [
+      ('Disposable Income Δ', AppTheme.accentGreen),
+      ('Operational Expense Index', AppTheme.accentRed),
+      ('Capital Access Pressure', AppTheme.accentAmber),
+      ('Systemic Friction', AppTheme.accentRed),
+      ('Social Equity Weight', AppTheme.accentCyan),
+      ('Systemic Trust Baseline', AppTheme.accentGreen),
+      ('Future Mobility Index', AppTheme.accentCyan),
+      ('Ecological Resource Pressure', AppTheme.accentAmber),
+    ];
+
+    return Column(
+      children: knobs.map((knob) {
+        return Container(
+          margin: const EdgeInsets.only(bottom: 8),
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: AppTheme.surface,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: AppTheme.border),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 4,
+                height: 24,
+                decoration: BoxDecoration(
+                  color: knob.$2,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(knob.$1,
+                    style: const TextStyle(
+                        fontFamily: 'SpaceMono',
+                        fontSize: 10,
+                        color: AppTheme.textPrimary)),
+              ),
+              Text('→',
+                  style: TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 10,
+                      color: knob.$2)),
+            ],
+          ),
+        );
+      }).toList(),
     );
   }
 }
 
-// ─── Stability Gauge Badge ────────────────────────────────────────────────────
+// ─── Shared Widgets ───────────────────────────────────────────────────────────
 
 class _StabilityGaugeBadge extends StatelessWidget {
-  final double score; // 0–100
+  final double score;
 
   const _StabilityGaugeBadge({required this.score});
 
@@ -488,224 +740,117 @@ class _StabilityGaugeBadge extends StatelessWidget {
             decoration: BoxDecoration(color: _color, shape: BoxShape.circle),
           ),
           const SizedBox(width: 6),
-          Text(
-            'STABILITY: ${score.toStringAsFixed(0)} — $_label',
-            style: TextStyle(
-                fontFamily: 'SpaceMono',
-                fontSize: 10,
-                fontWeight: FontWeight.w700,
-                color: _color),
-          ),
+          Text('STABILITY: ${score.toStringAsFixed(0)} — $_label',
+              style: TextStyle(
+                  fontFamily: 'SpaceMono',
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color: _color)),
         ],
       ),
     );
   }
 }
 
-// ─── Digital Malaysian Feed ───────────────────────────────────────────────────
+class _ScenarioComparisonBar extends StatelessWidget {
+  final SimulationState state;
 
-class _DigitalMalaysianFeed extends StatelessWidget {
-  final List<TickSummary> ticks;
-
-  const _DigitalMalaysianFeed({required this.ticks});
+  const _ScenarioComparisonBar({required this.state});
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const _SectionHeader(
-            icon: Icons.people_alt_outlined,
-            label: 'DEMOGRAPHIC REWARD FEED',
-            color: AppTheme.accentCyan),
-        const SizedBox(height: 12),
-        // Show all ticks, most recent first
-        ...ticks.reversed.map((tick) => _TickFeedCard(tick: tick)),
-      ],
-    );
-  }
-}
-
-class _TickFeedCard extends StatelessWidget {
-  final TickSummary tick;
-
-  const _TickFeedCard({required this.tick});
-
-  @override
-  Widget build(BuildContext context) {
-    const demos = ['B40', 'M40', 'T20'];
-    final demoColors = {
-      'B40': AppTheme.accentRed,
-      'M40': AppTheme.accentAmber,
-      'T20': AppTheme.accentGreen,
-    };
-
     return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: AppTheme.surface,
+        color: AppTheme.accentPurple.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: AppTheme.border),
+        border: Border.all(color: AppTheme.accentPurple.withValues(alpha: 0.25)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          const Row(
             children: [
-              Text('TICK ${tick.tickId}',
-                  style: const TextStyle(
+              Icon(Icons.compare_arrows_rounded,
+                  size: 12, color: AppTheme.accentPurple),
+              SizedBox(width: 6),
+              Text('A/B COMPARISON',
+                  style: TextStyle(
                       fontFamily: 'SpaceMono',
-                      fontSize: 11,
+                      fontSize: 9,
                       fontWeight: FontWeight.w700,
-                      color: AppTheme.accentCyan)),
-              const SizedBox(width: 12),
-              Text(
-                  'avg sentiment: ${tick.averageSentiment.toStringAsFixed(3)}',
-                  style: const TextStyle(
-                      fontFamily: 'SpaceMono',
-                      fontSize: 10,
-                      color: AppTheme.textMuted)),
-              const Spacer(),
-              _StabilityGaugeBadge(score: tick.rewardStabilityScore),
+                      color: AppTheme.accentPurple)),
             ],
           ),
-          const SizedBox(height: 12),
-          Row(
-            children: demos.map((demo) {
-              final color = demoColors[demo]!;
-              final reward = tick.averageRewardScore[demo];
-              final action = tick.demoActionSummary[demo] ?? '—';
-              return Expanded(
-                child: Container(
-                  margin: EdgeInsets.only(
-                      right: demo != 'T20' ? 8 : 0),
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.06),
-                    borderRadius: BorderRadius.circular(6),
-                    border:
-                        Border.all(color: color.withValues(alpha: 0.25)),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: color.withValues(alpha: 0.15),
-                              borderRadius: BorderRadius.circular(3),
-                            ),
-                            child: Text(demo,
-                                style: TextStyle(
-                                    fontFamily: 'SpaceMono',
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w700,
-                                    color: color)),
-                          ),
-                          const Spacer(),
-                          if (reward != null)
-                            Text(
-                              reward >= 0
-                                  ? '+${reward.toStringAsFixed(3)}'
-                                  : reward.toStringAsFixed(3),
-                              style: TextStyle(
-                                  fontFamily: 'SpaceMono',
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w700,
-                                  color: reward >= 0
-                                      ? AppTheme.accentGreen
-                                      : AppTheme.accentRed),
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        _humanizeAction(action),
-                        style: const TextStyle(
-                            fontFamily: 'SpaceMono',
-                            fontSize: 9,
-                            color: AppTheme.textSecondary),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 6),
-                      if (reward != null)
-                        _RewardBar(reward: reward, color: color),
-                    ],
-                  ),
-                ),
-              );
-            }).toList(),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            children: [
+              _ScenarioChip(
+                label: 'None',
+                isSelected: state.comparisonScenarioId == null,
+                color: AppTheme.textMuted,
+                onTap: () => state.setComparisonScenario(null),
+              ),
+              ...state.savedScenarios.map((s) => _ScenarioChip(
+                    label: s.label,
+                    isSelected: state.comparisonScenarioId == s.id,
+                    color: AppTheme.accentAmber,
+                    onTap: () => state.setComparisonScenario(s.id),
+                  )),
+            ],
           ),
         ],
       ),
     );
   }
-
-  /// Converts snake_case action to human-readable label.
-  String _humanizeAction(String raw) {
-    // e.g. "60% of B40 agents are 'cutting_expenses'" → "60% Cutting Expenses"
-    return raw
-        .replaceAll("'", '')
-        .replaceAll('_', ' ')
-        .split(' ')
-        .map((w) => w.isNotEmpty
-            ? '${w[0].toUpperCase()}${w.substring(1)}'
-            : w)
-        .join(' ');
-  }
 }
 
-class _RewardBar extends StatelessWidget {
-  final double reward; // typically -1.0 to 1.0
+class _ScenarioChip extends StatelessWidget {
+  final String label;
+  final bool isSelected;
   final Color color;
+  final VoidCallback onTap;
 
-  const _RewardBar({required this.reward, required this.color});
+  const _ScenarioChip({
+    required this.label,
+    required this.isSelected,
+    required this.color,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
-    // Map reward [-1, 1] → fill fraction [0, 1]
-    final fill = ((reward + 1.0) / 2.0).clamp(0.0, 1.0);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text('REWARD',
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: isSelected ? color.withValues(alpha: 0.15) : Colors.transparent,
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(
+              color: isSelected
+                  ? color.withValues(alpha: 0.6)
+                  : AppTheme.border),
+        ),
+        child: Text(label,
             style: TextStyle(
                 fontFamily: 'SpaceMono',
-                fontSize: 8,
-                color: AppTheme.textMuted)),
-        const SizedBox(height: 3),
-        Container(
-          height: 4,
-          decoration: BoxDecoration(
-            color: AppTheme.border,
-            borderRadius: BorderRadius.circular(2),
-          ),
-          child: FractionallySizedBox(
-            alignment: Alignment.centerLeft,
-            widthFactor: fill,
-            child: Container(
-              decoration: BoxDecoration(
-                color: color,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-        ),
-      ],
+                fontSize: 10,
+                fontWeight:
+                    isSelected ? FontWeight.w700 : FontWeight.normal,
+                color: isSelected ? color : AppTheme.textMuted)),
+      ),
     );
   }
 }
 
-// ─── Stress Test Line Chart ───────────────────────────────────────────────────
+// ─── Column 1: The Agents ─────────────────────────────────────────────────────
+
 
 class _StressTestChart extends StatelessWidget {
-  final List<double> history; // reward_stability_score per tick (current run)
-  final SavedScenario? comparisonScenario; // optional overlay
+  final List<double> history;
+  final SavedScenario? comparisonScenario;
 
   const _StressTestChart({
     required this.history,
@@ -733,41 +878,28 @@ class _StressTestChart extends StatelessWidget {
         children: [
           Row(
             children: [
-              _SectionHeader(
-                icon: _isInFailure
-                    ? Icons.warning_amber_rounded
-                    : Icons.show_chart_rounded,
-                label: 'REWARD STABILITY vs TIME',
-                color: borderColor,
-              ),
+              Icon(
+                  _isInFailure
+                      ? Icons.warning_amber_rounded
+                      : Icons.show_chart_rounded,
+                  size: 14,
+                  color: borderColor),
+              const SizedBox(width: 8),
+              Text('REWARD STABILITY vs TIME',
+                  style: TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: borderColor,
+                      letterSpacing: 0.8)),
               const Spacer(),
-              // Comparison legend
               if (comparisonScenario != null) ...[
-                _LegendDot(
-                    color: AppTheme.accentCyan, label: 'Current'),
+                _LegendDot(color: AppTheme.accentCyan, label: 'Current'),
                 const SizedBox(width: 10),
                 _LegendDot(
                     color: AppTheme.accentAmber,
                     label: comparisonScenario!.label),
-                const SizedBox(width: 10),
               ],
-              if (_isInFailure)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: AppTheme.accentRed.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(
-                        color: AppTheme.accentRed.withValues(alpha: 0.5)),
-                  ),
-                  child: const Text('⚠ POLICY FAILURE / SOCIAL UNREST',
-                      style: TextStyle(
-                          fontFamily: 'SpaceMono',
-                          fontSize: 9,
-                          fontWeight: FontWeight.w700,
-                          color: AppTheme.accentRed)),
-                ),
             ],
           ),
           const SizedBox(height: 16),
@@ -820,9 +952,7 @@ class _LegendDot extends StatelessWidget {
         const SizedBox(width: 4),
         Text(label,
             style: TextStyle(
-                fontFamily: 'SpaceMono',
-                fontSize: 9,
-                color: color)),
+                fontFamily: 'SpaceMono', fontSize: 9, color: color)),
       ],
     );
   }
@@ -830,7 +960,7 @@ class _LegendDot extends StatelessWidget {
 
 class _StabilityLinePainter extends CustomPainter {
   final List<double> history;
-  final List<double>? comparisonHistory; // optional overlay (Scenario B)
+  final List<double>? comparisonHistory;
 
   const _StabilityLinePainter({
     required this.history,
@@ -853,20 +983,7 @@ class _StabilityLinePainter extends CustomPainter {
     canvas.drawLine(
         Offset(0, thresholdY), Offset(size.width, thresholdY), threshPaint);
 
-    // Draw "40" label
-    final tp = TextPainter(
-      text: TextSpan(
-        text: '40',
-        style: TextStyle(
-            fontFamily: 'SpaceMono',
-            fontSize: 8,
-            color: AppTheme.accentRed.withValues(alpha: 0.6)),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    tp.paint(canvas, Offset(2, thresholdY - 10));
-
-    // ── Draw comparison overlay (Scenario B) first so it sits behind ─────────
+    // Draw comparison overlay (ghost line) first
     if (comparisonHistory != null && comparisonHistory!.isNotEmpty) {
       _drawLine(
         canvas: canvas,
@@ -879,7 +996,7 @@ class _StabilityLinePainter extends CustomPainter {
       );
     }
 
-    // ── Draw current run (Scenario A / active) ────────────────────────────────
+    // Draw current run
     _drawLine(
       canvas: canvas,
       size: size,
@@ -995,8 +1112,6 @@ class _StabilityLinePainter extends CustomPainter {
       old.history != history || old.comparisonHistory != comparisonHistory;
 }
 
-// ─── Macro Summary Card ───────────────────────────────────────────────────────
-
 class _MacroSummaryCard extends StatelessWidget {
   final SimulateResponse result;
 
@@ -1017,10 +1132,20 @@ class _MacroSummaryCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const _SectionHeader(
-              icon: Icons.analytics_outlined,
-              label: 'MACRO SUMMARY',
-              color: AppTheme.accentGreen),
+          const Row(
+            children: [
+              Icon(Icons.analytics_outlined,
+                  size: 12, color: AppTheme.accentGreen),
+              SizedBox(width: 8),
+              Text('MACRO SUMMARY',
+                  style: TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      color: AppTheme.accentGreen,
+                      letterSpacing: 0.8)),
+            ],
+          ),
           const SizedBox(height: 12),
           Row(
             children: [
@@ -1045,16 +1170,6 @@ class _MacroSummaryCard extends StatelessWidget {
                   color: ineq <= 0
                       ? AppTheme.accentGreen
                       : AppTheme.accentRed,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _MetricTile(
-                  label: 'Anomalies',
-                  value: '${result.anomalies.length}',
-                  color: result.anomalies.isEmpty
-                      ? AppTheme.accentGreen
-                      : AppTheme.accentAmber,
                 ),
               ),
             ],
@@ -1099,71 +1214,6 @@ class _MetricTile extends StatelessWidget {
                   color: color)),
         ],
       ),
-    );
-  }
-}
-
-// ─── AI Recommendation Card ───────────────────────────────────────────────────
-
-class _RecommendationCard extends StatelessWidget {
-  final String text;
-
-  const _RecommendationCard({required this.text});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: AppTheme.accentPurple.withValues(alpha: 0.05),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(
-            color: AppTheme.accentPurple.withValues(alpha: 0.3)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const _SectionHeader(
-              icon: Icons.auto_awesome,
-              label: 'AI POLICY RECOMMENDATION',
-              color: AppTheme.accentPurple),
-          const SizedBox(height: 10),
-          Text(text,
-              style: const TextStyle(
-                  fontFamily: 'SpaceMono',
-                  fontSize: 11,
-                  color: AppTheme.textSecondary,
-                  height: 1.6)),
-        ],
-      ),
-    );
-  }
-}
-
-// ─── Shared Widgets ───────────────────────────────────────────────────────────
-
-class _SectionHeader extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final Color color;
-
-  const _SectionHeader(
-      {required this.icon, required this.label, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(icon, size: 14, color: color),
-        const SizedBox(width: 8),
-        Text(label,
-            style: TextStyle(
-                fontFamily: 'SpaceMono',
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                color: color,
-                letterSpacing: 0.8)),
-      ],
     );
   }
 }

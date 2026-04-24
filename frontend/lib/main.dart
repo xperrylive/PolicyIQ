@@ -4,7 +4,9 @@ import 'package:provider/provider.dart';
 import 'package:window_size/window_size.dart';
 import 'theme/app_theme.dart';
 import 'services/api_client.dart';
+import 'state/simulation_state.dart';
 import 'screens/gatekeeper_screen.dart';
+import 'screens/dashboard_screen.dart';
 import 'screens/control_panel_screen.dart';
 import 'screens/macro_analytics_screen.dart';
 import 'screens/micro_insights_screen.dart';
@@ -73,6 +75,12 @@ class _AppShellState extends State<AppShell> with TickerProviderStateMixin {
       accentColor: AppTheme.accentCyan,
     ),
     const _NavItem(
+      icon: Icons.people_alt,
+      label: 'LIVE DASHBOARD',
+      sublabel: 'MARL Agent Monitor',
+      accentColor: AppTheme.accentPurple,
+    ),
+    const _NavItem(
       icon: Icons.tune,
       label: 'UNIVERSAL KNOBS',
       sublabel: '8-Knob Physics Engine',
@@ -134,6 +142,7 @@ class _AppShellState extends State<AppShell> with TickerProviderStateMixin {
   Widget build(BuildContext context) {
     final screens = <Widget>[
       GatekeeperScreen(onNavigate: _navigateTo),
+      const DashboardScreen(),
       const ControlPanelScreen(),
       const MacroAnalyticsScreen(),
       const MicroInsightsScreen(),

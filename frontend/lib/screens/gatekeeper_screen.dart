@@ -1,10 +1,17 @@
+// gatekeeper_screen.dart — PolicyIQ Gatekeeper (State-Driven Refactor)
+//
+// Changes:
+// 1. 'Configure Knobs' → 'REVIEW ENVIRONMENT'
+// 2. EnvironmentBlueprint sublayers displayed immediately after validation
+// 3. 'View Analytics' removed until simulation is completed
+// 4. All UI reacts to SimulationStatus enum
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../theme/app_theme.dart';
 import '../models/contracts.dart';
 import '../services/api_client.dart';
-import '../services/decomposition_service.dart';
-enum InputValidationState { idle, typing, validating, vague, refined, ready }
+import '../state/simulation_state.dart';
 
 class GatekeeperScreen extends StatefulWidget {
   final void Function(int tabIndex)? onNavigate;
@@ -19,22 +26,10 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
     with TickerProviderStateMixin {
   final TextEditingController _controller = TextEditingController();
   final FocusNode _focusNode = FocusNode();
-  InputValidationState _state = InputValidationState.idle;
   late AnimationController _pulseCtrl;
   late AnimationController _slideCtrl;
   late Animation<double> _pulseAnim;
   late Animation<Offset> _slideAnim;
-  
-  // New policy validation state
-  ValidatePolicyResponse? _validationResult;
-  DecompositionResult? _decompositionResult;
-  bool _isValidating = false;
-
-  final List<Map<String, String>> _recentPolicies = [
-    {'text': 'What happens if we cut welfare by half?', 'status': 'VAGUE → REFINED'},
-    {'text': 'Universal basic income pilot program', 'status': 'VALIDATED'},
-    {'text': 'Carbon tax for manufacturing sector', 'status': 'VALIDATED'},
-  ];
 
   @override
   void initState() {
@@ -50,7 +45,8 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
     _pulseAnim = Tween<double>(begin: 1.0, end: 1.2).animate(
       CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut),
     );
-    _slideAnim = Tween<Offset>(begin: const Offset(0, 0.2), end: Offset.zero).animate(
+    _slideAnim = Tween<Offset>(begin: const Offset(0, 0.2), end: Offset.zero)
+        .animate(
       CurvedAnimation(parent: _slideCtrl, curve: Curves.easeOut),
     );
     _pulseCtrl.repeat(reverse: true);
@@ -67,115 +63,84 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
 
   void _analyzeInput() async {
     if (_controller.text.isEmpty) return;
-    setState(() {
-      _state = InputValidationState.validating;
-      _isValidating = true;
-      _validationResult = null;
-      _decompositionResult = null;
-    });
+    final simState = context.read<SimulationState>();
+    final client = context.read<ApiClient>();
+
+    simState.policyText = _controller.text;
+    simState.setValidating();
 
     try {
-      // Call the backend Gatekeeper via ApiClient and update SimulationState.
-      final simState = context.read<SimulationState>();
-      final client = context.read<ApiClient>();
-      simState.policyText = _controller.text;
-
       final validation = await client.validatePolicy(_controller.text);
-      simState.setValidationResult(validation);
 
       if (!mounted) return;
-
-      setState(() {
-        _validationResult = validation;
-        _isValidating = false;
-      });
 
       if (validation.isValid) {
-        // Step 2: Decompose policy into Sub-Layers
-        final decomposition = await DecompositionService.decomposePolicy(
-          _controller.text,
-          const [], // economicLever not in ValidatePolicyResponse; backend handles it
-          const [], // targetGroups not in ValidatePolicyResponse; backend handles it
-        );
-
-        if (!mounted) return;
-
-        setState(() {
-          _decompositionResult = decomposition;
-          _state = InputValidationState.ready;
-        });
-
+        simState.setValidationSuccess(validation);
+        _slideCtrl.forward(from: 0);
       } else {
-        setState(() {
-          _state = InputValidationState.vague;
-        });
+        simState.setValidationFailed(
+            validation.rejectionReason ?? 'Policy rejected');
       }
-
-      _slideCtrl.forward();
     } catch (e) {
       if (!mounted) return;
-      debugPrint('ERROR in _analyzeInput: $e');
-      setState(() {
-        _isValidating = false;
-        _state = InputValidationState.idle;
-      });
+      simState.setValidationFailed('Validation error: $e');
     }
   }
 
-  void _selectRefinement(String label) {
+  void _selectRefinement(String refinedText) {
     setState(() {
-      _state = InputValidationState.refined;
-      _controller.text = label;
+      _controller.text = refinedText;
     });
+    _analyzeInput();
   }
 
   void _goToControlPanel() => widget.onNavigate?.call(1);
-  void _goToMacroAnalytics() => widget.onNavigate?.call(2);
 
-  Color get _stateColor {
-    switch (_state) {
-      case InputValidationState.idle:
+  Color _getStatusColor(SimulationStatus status) {
+    switch (status) {
+      case SimulationStatus.idle:
         return AppTheme.textMuted;
-      case InputValidationState.typing:
-        return AppTheme.accentCyan;
-      case InputValidationState.validating:
+      case SimulationStatus.validating:
         return AppTheme.accentAmber;
-      case InputValidationState.vague:
-        return AppTheme.accentRed;
-      case InputValidationState.refined:
-      case InputValidationState.ready:
+      case SimulationStatus.readyToReview:
         return AppTheme.accentGreen;
+      case SimulationStatus.simulating:
+        return AppTheme.accentCyan;
+      case SimulationStatus.completed:
+        return AppTheme.accentGreen;
+      case SimulationStatus.failed:
+        return AppTheme.accentRed;
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final simState = context.watch<SimulationState>();
+    final statusColor = _getStatusColor(simState.status);
+
     return Scaffold(
       backgroundColor: AppTheme.background,
       body: Column(
         children: [
-          _buildHeader(),
+          _buildHeader(simState, statusColor),
           Expanded(
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(24),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _buildInputSection(),
+                  _buildInputSection(simState, statusColor),
                   const SizedBox(height: 32),
-                  if (_state == InputValidationState.vague)
+                  if (simState.status == SimulationStatus.failed)
                     SlideTransition(
                       position: _slideAnim,
-                      child: _buildRefinementOptions(),
+                      child: _buildRejectionPanel(simState),
                     ),
-                  if (_state == InputValidationState.ready ||
-                      _state == InputValidationState.refined)
+                  if (simState.status == SimulationStatus.readyToReview)
                     SlideTransition(
                       position: _slideAnim,
-                      child: _buildSuccessPanel(),
+                      child: _buildSuccessPanel(simState),
                     ),
-                  const SizedBox(height: 32),
-                  _buildRecentPolicies(),
                 ],
               ),
             ),
@@ -185,7 +150,7 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
     );
   }
 
-  Widget _buildHeader() {
+  Widget _buildHeader(SimulationState simState, Color statusColor) {
     return Container(
       padding: const EdgeInsets.fromLTRB(24, 20, 24, 16),
       decoration: const BoxDecoration(
@@ -198,111 +163,111 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
             width: 40,
             height: 40,
             decoration: BoxDecoration(
-              color: AppTheme.accentCyan.withOpacity(0.1),
+              color: AppTheme.accentCyan.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: AppTheme.accentCyan.withOpacity(0.3)),
+              border:
+                  Border.all(color: AppTheme.accentCyan.withValues(alpha: 0.3)),
             ),
-            child: const Icon(
-              Icons.policy,
-              color: AppTheme.accentCyan,
-              size: 20,
-            ),
+            child: const Icon(Icons.policy, color: AppTheme.accentCyan, size: 20),
           ),
           const SizedBox(width: 16),
           const Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'POLICY INPUT',
-                  style: TextStyle(
-                    fontFamily: 'SpaceMono',
-                    fontSize: 20,
-                    fontWeight: FontWeight.w700,
-                    color: AppTheme.textPrimary,
-                  ),
-                ),
-                Text(
-                  'Gatekeeper Validation System',
-                  style: TextStyle(
-                    fontFamily: 'SpaceMono',
-                    fontSize: 12,
-                    color: AppTheme.textMuted,
-                  ),
-                ),
+                Text('POLICY INPUT',
+                    style: TextStyle(
+                        fontFamily: 'SpaceMono',
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                        color: AppTheme.textPrimary)),
+                Text('Gatekeeper Validation System',
+                    style: TextStyle(
+                        fontFamily: 'SpaceMono',
+                        fontSize: 12,
+                        color: AppTheme.textMuted)),
               ],
             ),
           ),
           const Spacer(),
-          _buildStatusBubble('AI VALIDATION', AppTheme.accentCyan),
+          _buildStatusBubble(_getStatusLabel(simState.status), statusColor),
         ],
       ),
     );
+  }
+
+  String _getStatusLabel(SimulationStatus status) {
+    switch (status) {
+      case SimulationStatus.idle:
+        return 'IDLE';
+      case SimulationStatus.validating:
+        return 'VALIDATING';
+      case SimulationStatus.readyToReview:
+        return 'READY TO REVIEW';
+      case SimulationStatus.simulating:
+        return 'SIMULATING';
+      case SimulationStatus.completed:
+        return 'COMPLETED';
+      case SimulationStatus.failed:
+        return 'FAILED';
+    }
   }
 
   Widget _buildStatusBubble(String label, Color color) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.08),
+        color: color.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: color.withOpacity(0.3)),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
       ),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontFamily: 'SpaceMono',
-          fontSize: 10,
-          color: color,
-          letterSpacing: 1,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
+      child: Text(label,
+          style: TextStyle(
+              fontFamily: 'SpaceMono',
+              fontSize: 10,
+              color: color,
+              letterSpacing: 1,
+              fontWeight: FontWeight.w700)),
     );
   }
 
-  Widget _buildInputSection() {
+  Widget _buildInputSection(SimulationState simState, Color statusColor) {
+    final isValidating = simState.status == SimulationStatus.validating;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const SectionLabel('POLICY TEXT'),
+        const _SectionLabel('POLICY TEXT'),
         const SizedBox(height: 12),
         Container(
           decoration: BoxDecoration(
             color: AppTheme.surface,
             borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: _stateColor.withOpacity(0.3)),
+            border: Border.all(color: statusColor.withValues(alpha: 0.3)),
           ),
           child: TextField(
             controller: _controller,
             focusNode: _focusNode,
             maxLines: 6,
             style: const TextStyle(
-              fontFamily: 'SpaceMono',
-              fontSize: 13,
-              color: AppTheme.textPrimary,
-            ),
+                fontFamily: 'SpaceMono',
+                fontSize: 13,
+                color: AppTheme.textPrimary),
             decoration: const InputDecoration(
               hintText: 'Enter Malaysian government policy text for simulation...',
               hintStyle: TextStyle(
-                fontFamily: 'SpaceMono',
-                fontSize: 13,
-                color: AppTheme.textMuted,
-              ),
+                  fontFamily: 'SpaceMono',
+                  fontSize: 13,
+                  color: AppTheme.textMuted),
               border: InputBorder.none,
               contentPadding: EdgeInsets.all(16),
             ),
-            onChanged: (value) {
-              if (_state == InputValidationState.idle) {
-                setState(() => _state = InputValidationState.typing);
-              }
-            },
           ),
         ),
         const SizedBox(height: 16),
         Row(
           children: [
-            if (_isValidating)
+            if (isValidating)
               AnimatedBuilder(
                 animation: _pulseAnim,
                 builder: (context, child) {
@@ -310,7 +275,7 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
                     width: 20,
                     height: 20,
                     decoration: BoxDecoration(
-                      color: AppTheme.accentAmber.withOpacity(0.2),
+                      color: AppTheme.accentAmber.withValues(alpha: 0.2),
                       shape: BoxShape.circle,
                     ),
                     child: Center(
@@ -320,9 +285,7 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
                           width: 8,
                           height: 8,
                           decoration: const BoxDecoration(
-                            color: AppTheme.accentAmber,
-                            shape: BoxShape.circle,
-                          ),
+                              color: AppTheme.accentAmber, shape: BoxShape.circle),
                         ),
                       ),
                     ),
@@ -330,35 +293,29 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
                 },
               ),
             const SizedBox(width: 12),
-            Text(
-              _isValidating ? 'Validating with AI...' : _getValidationMessage(),
-              style: TextStyle(
-                fontFamily: 'SpaceMono',
-                fontSize: 11,
-                color: _stateColor,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
+            Text(_getValidationMessage(simState.status),
+                style: TextStyle(
+                    fontFamily: 'SpaceMono',
+                    fontSize: 11,
+                    color: statusColor,
+                    fontWeight: FontWeight.w600)),
             const Spacer(),
             ElevatedButton(
-              onPressed: _controller.text.isNotEmpty && !_isValidating ? _analyzeInput : null,
+              onPressed: _controller.text.isNotEmpty && !isValidating
+                  ? _analyzeInput
+                  : null,
               style: ElevatedButton.styleFrom(
-                backgroundColor: _stateColor,
+                backgroundColor: statusColor,
                 foregroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(6),
-                ),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
               ),
-              child: Text(
-                _isValidating ? 'ANALYZING...' : 'VALIDATE POLICY',
-                style: const TextStyle(
-                  fontFamily: 'SpaceMono',
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1,
-                ),
-              ),
+              child: Text(isValidating ? 'ANALYZING...' : 'VALIDATE POLICY',
+                  style: const TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1)),
             ),
           ],
         ),
@@ -366,91 +323,64 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
     );
   }
 
-  String _getValidationMessage() {
-    switch (_state) {
-      case InputValidationState.idle:
+  String _getValidationMessage(SimulationStatus status) {
+    switch (status) {
+      case SimulationStatus.idle:
         return 'Enter policy text to begin validation';
-      case InputValidationState.typing:
-        return 'Type your policy and click validate';
-      case InputValidationState.validating:
+      case SimulationStatus.validating:
         return 'AI is analyzing your policy...';
-      case InputValidationState.vague:
+      case SimulationStatus.readyToReview:
+        return 'Policy is ready for environment review';
+      case SimulationStatus.simulating:
+        return 'Simulation in progress...';
+      case SimulationStatus.completed:
+        return 'Simulation completed';
+      case SimulationStatus.failed:
         return 'Policy needs refinement';
-      case InputValidationState.refined:
-      case InputValidationState.ready:
-        return 'Policy is ready for simulation';
     }
   }
 
-  Widget _buildRefinementOptions() {
-    if (_validationResult == null) return const SizedBox.shrink();
-    
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const SizedBox(height: 20),
-        Row(
-          children: [
-            Icon(
-              _validationResult!.isValid ? Icons.check_circle : Icons.warning,
-              size: 12,
-              color: _validationResult!.isValid ? AppTheme.accentGreen : AppTheme.accentRed,
-            ),
-            const SizedBox(width: 8),
-            SectionLabel(
-              _validationResult!.isValid ? 'POLICY VALID' : 'POLICY REJECTED',
-              color: _validationResult!.isValid ? AppTheme.accentGreen : AppTheme.accentRed,
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: _validationResult!.isValid 
-                ? AppTheme.accentGreen.withOpacity(0.05)
-                : AppTheme.accentRed.withOpacity(0.05),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: _validationResult!.isValid 
-                  ? AppTheme.accentGreen.withOpacity(0.3)
-                  : AppTheme.accentRed.withOpacity(0.3),
-            ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+  Widget _buildRejectionPanel(SimulationState simState) {
+    final validation = simState.validationResult;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppTheme.accentRed.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppTheme.accentRed.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
             children: [
-              Text(
-                _validationResult!.isValid ? 'Policy is simulation-ready' : 'Policy needs refinement',
-                style: TextStyle(
-                  fontFamily: 'SpaceMono',
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: _validationResult!.isValid ? AppTheme.accentGreen : AppTheme.accentRed,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                _validationResult!.rejectionReason ?? '',
-                style: const TextStyle(
+              Icon(Icons.warning, size: 14, color: AppTheme.accentRed),
+              SizedBox(width: 8),
+              Text('POLICY REJECTED',
+                  style: TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: AppTheme.accentRed)),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(simState.validationError ?? 'Unknown error',
+              style: const TextStyle(
                   fontFamily: 'SpaceMono',
                   fontSize: 11,
-                  color: AppTheme.textSecondary,
-                ),
-              ),
-              if (!_validationResult!.isValid && _validationResult!.refinedOptions.isNotEmpty) ...[
-                const SizedBox(height: 16),
-                const Text(
-                  'RECOMMENDED OPTIONS:',
-                  style: TextStyle(
+                  color: AppTheme.textSecondary)),
+          if (validation?.refinedOptions.isNotEmpty == true) ...[
+            const SizedBox(height: 16),
+            const Text('RECOMMENDED OPTIONS:',
+                style: TextStyle(
                     fontFamily: 'SpaceMono',
                     fontSize: 10,
                     fontWeight: FontWeight.w600,
-                    color: AppTheme.textMuted,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                ..._validationResult!.refinedOptions.map((option) => Padding(
+                    color: AppTheme.textMuted)),
+            const SizedBox(height: 8),
+            ...validation!.refinedOptions.map((option) => Padding(
                   padding: const EdgeInsets.only(bottom: 6),
                   child: GestureDetector(
                     onTap: () => _selectRefinement(option),
@@ -461,134 +391,29 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
                         borderRadius: BorderRadius.circular(6),
                         border: Border.all(color: AppTheme.border),
                       ),
-                      child: Text(
-                        option,
-                        style: const TextStyle(
-                          fontFamily: 'SpaceMono',
-                          fontSize: 10,
-                          color: AppTheme.textSecondary,
-                        ),
-                      ),
+                      child: Text(option,
+                          style: const TextStyle(
+                              fontFamily: 'SpaceMono',
+                              fontSize: 10,
+                              color: AppTheme.textSecondary)),
                     ),
                   ),
                 )),
-              ],
-              if (_validationResult!.isValid && _decompositionResult != null) ...[
-                const SizedBox(height: 16),
-                _buildDecompositionResults(),
-              ],
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildDecompositionResults() {
-    if (_decompositionResult == null || !_decompositionResult!.success) {
-      return const SizedBox.shrink();
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Row(
-          children: [
-            Icon(Icons.layers, size: 12, color: AppTheme.accentCyan),
-            SizedBox(width: 8),
-            SectionLabel('DYNAMIC DECOMPOSITION', color: AppTheme.accentCyan),
           ],
-        ),
-        const SizedBox(height: 8),
-        ..._decompositionResult!.subLayers.map((subLayer) => Container(
-          margin: const EdgeInsets.only(bottom: 8),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: AppTheme.surfaceElevated,
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(color: AppTheme.border),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: subLayer.accentColor,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      subLayer.name,
-                      style: const TextStyle(
-                        fontFamily: 'SpaceMono',
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: AppTheme.textPrimary,
-                      ),
-                    ),
-                  ),
-                  Text(
-                      '×${subLayer.impactMultiplier.toStringAsFixed(1)}',
-                      style: const TextStyle(
-                        fontFamily: 'SpaceMono',
-                        fontSize: 10,
-                        color: AppTheme.accentCyan,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              Text(
-                subLayer.description,
-                style: const TextStyle(
-                  fontFamily: 'SpaceMono',
-                  fontSize: 10,
-                  color: AppTheme.textSecondary,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Wrap(
-                spacing: 4,
-                children: subLayer.targetDemographics.map((demo) => Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: AppTheme.accentCyan.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(3),
-                    border: Border.all(color: AppTheme.accentCyan.withOpacity(0.3)),
-                  ),
-                  child: Text(
-                    demo,
-                    style: const TextStyle(
-                      fontFamily: 'SpaceMono',
-                      fontSize: 9,
-                      color: AppTheme.accentCyan,
-                    ),
-                  ),
-                )).toList(),
-              ),
-            ],
-          ),
-        )),
-      ],
+        ],
+      ),
     );
   }
 
-  Widget _buildSuccessPanel() {
-    final blueprint = _validationResult?.environmentBlueprint;
+  Widget _buildSuccessPanel(SimulationState simState) {
+    final blueprint = simState.environmentBlueprint;
 
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: AppTheme.accentGreen.withOpacity(0.05),
+        color: AppTheme.accentGreen.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: AppTheme.accentGreen.withOpacity(0.3)),
+        border: Border.all(color: AppTheme.accentGreen.withValues(alpha: 0.3)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -597,135 +422,79 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
             children: [
               const Icon(Icons.check_circle, color: AppTheme.accentGreen, size: 16),
               const SizedBox(width: 8),
-              const Text(
-                'POLICY VALIDATED',
-                style: TextStyle(
-                  fontFamily: 'SpaceMono',
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                  color: AppTheme.accentGreen,
-                ),
-              ),
+              const Text('POLICY VALIDATED',
+                  style: TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: AppTheme.accentGreen)),
               const Spacer(),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
-                  color: AppTheme.accentGreen.withOpacity(0.1),
+                  color: AppTheme.accentGreen.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(4),
                 ),
-                child: const Text(
-                  'READY FOR SIMULATION',
-                  style: TextStyle(
-                    fontFamily: 'SpaceMono',
-                    fontSize: 10,
-                    color: AppTheme.accentGreen,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
+                child: const Text('READY FOR SIMULATION',
+                    style: TextStyle(
+                        fontFamily: 'SpaceMono',
+                        fontSize: 10,
+                        color: AppTheme.accentGreen,
+                        fontWeight: FontWeight.w600)),
               ),
             ],
           ),
-
-          // ── EnvironmentBlueprint summary ──────────────────────────────
           if (blueprint != null) ...[
             const SizedBox(height: 16),
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: AppTheme.accentCyan.withOpacity(0.05),
+                color: AppTheme.accentCyan.withValues(alpha: 0.05),
                 borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: AppTheme.accentCyan.withOpacity(0.2)),
+                border: Border.all(color: AppTheme.accentCyan.withValues(alpha: 0.2)),
               ),
-              child: Text(
-                blueprint.policySummary,
-                style: const TextStyle(
-                  fontFamily: 'SpaceMono',
-                  fontSize: 11,
-                  color: AppTheme.textSecondary,
-                  height: 1.5,
-                ),
-              ),
+              child: Text(blueprint.policySummary,
+                  style: const TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 11,
+                      color: AppTheme.textSecondary,
+                      height: 1.5)),
             ),
             const SizedBox(height: 16),
             const Row(
               children: [
                 Icon(Icons.layers, size: 12, color: AppTheme.accentCyan),
                 SizedBox(width: 8),
-                Text(
-                  'ENVIRONMENT SUBLAYERS (AI Physics)',
-                  style: TextStyle(
-                    fontFamily: 'SpaceMono',
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                    color: AppTheme.accentCyan,
-                    letterSpacing: 0.8,
-                  ),
-                ),
+                Text('ENVIRONMENT SUBLAYERS (AI PHYSICS)',
+                    style: TextStyle(
+                        fontFamily: 'SpaceMono',
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: AppTheme.accentCyan,
+                        letterSpacing: 0.8)),
               ],
             ),
             const SizedBox(height: 8),
             ...blueprint.dynamicSublayers.map((sl) => _buildSublayerCard(sl)),
-          ] else ...[
-            const SizedBox(height: 16),
-            const Text(
-              'Your policy has been validated by the Gatekeeper AI and decomposed into simulation-ready Sub-Layers. You can now proceed to the Universal Knobs to configure the simulation parameters.',
-              style: TextStyle(
-                fontFamily: 'SpaceMono',
-                fontSize: 12,
-                color: AppTheme.textSecondary,
-              ),
-            ),
           ],
-
           const SizedBox(height: 20),
-          Row(
-            children: [
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: _goToControlPanel,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppTheme.accentCyan,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                  ),
-                  child: const Text(
-                    'CONFIGURE KNOBS',
-                    style: TextStyle(
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: _goToControlPanel,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.accentCyan,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+              ),
+              child: const Text('REVIEW ENVIRONMENT',
+                  style: TextStyle(
                       fontFamily: 'SpaceMono',
                       fontSize: 11,
                       fontWeight: FontWeight.w700,
-                      letterSpacing: 1,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: _goToMacroAnalytics,
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppTheme.accentGreen,
-                    side: const BorderSide(color: AppTheme.accentGreen),
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                  ),
-                  child: const Text(
-                    'VIEW ANALYTICS',
-                    style: TextStyle(
-                      fontFamily: 'SpaceMono',
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 1,
-                    ),
-                  ),
-                ),
-              ),
-            ],
+                      letterSpacing: 1)),
+            ),
           ),
         ],
       ),
@@ -740,8 +509,7 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
             : AppTheme.accentAmber;
 
     final delta = sl.policyValue - sl.baselineValue;
-    final deltaStr =
-        '${delta >= 0 ? '+' : ''}${delta.toStringAsFixed(2)} ${sl.unit}';
+    final deltaStr = '${delta >= 0 ? '+' : ''}${delta.toStringAsFixed(2)} ${sl.unit}';
 
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
@@ -766,102 +534,59 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  sl.name,
-                  style: const TextStyle(
-                    fontFamily: 'SpaceMono',
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: AppTheme.textPrimary,
-                  ),
-                ),
+                Text(sl.name,
+                    style: const TextStyle(
+                        fontFamily: 'SpaceMono',
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: AppTheme.textPrimary)),
                 const SizedBox(height: 2),
-                Text(
-                  '↳ ${sl.parentKnob.replaceAll('_', ' ')}',
-                  style: const TextStyle(
-                    fontFamily: 'SpaceMono',
-                    fontSize: 9,
-                    color: AppTheme.textMuted,
-                  ),
-                ),
+                Text('↳ ${sl.parentKnob.replaceAll('_', ' ')}',
+                    style: const TextStyle(
+                        fontFamily: 'SpaceMono',
+                        fontSize: 9,
+                        color: AppTheme.textMuted)),
               ],
             ),
           ),
           Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              Text(
-                deltaStr,
-                style: TextStyle(
-                  fontFamily: 'SpaceMono',
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                  color: impactColor,
-                ),
-              ),
+              Text(deltaStr,
+                  style: TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: impactColor)),
               const SizedBox(height: 2),
               Text(
-                '${sl.baselineValue.toStringAsFixed(2)} → ${sl.policyValue.toStringAsFixed(2)}',
-                style: const TextStyle(
-                  fontFamily: 'SpaceMono',
-                  fontSize: 9,
-                  color: AppTheme.textMuted,
-                ),
-              ),
+                  '${sl.baselineValue.toStringAsFixed(2)} → ${sl.policyValue.toStringAsFixed(2)}',
+                  style: const TextStyle(
+                      fontFamily: 'SpaceMono',
+                      fontSize: 9,
+                      color: AppTheme.textMuted)),
             ],
           ),
         ],
       ),
     );
   }
+}
 
-  Widget _buildRecentPolicies() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const SectionLabel('RECENT POLICIES'),
-        const SizedBox(height: 12),
-        ..._recentPolicies.map((policy) => Container(
-          margin: const EdgeInsets.only(bottom: 8),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: AppTheme.surface,
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(color: AppTheme.border),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  policy['text']!,
-                  style: const TextStyle(
-                    fontFamily: 'SpaceMono',
-                    fontSize: 11,
-                    color: AppTheme.textSecondary,
-                  ),
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: AppTheme.accentCyan.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(3),
-                  border: Border.all(color: AppTheme.accentCyan.withOpacity(0.3)),
-                ),
-                child: Text(
-                  policy['status']!,
-                  style: const TextStyle(
-                    fontFamily: 'SpaceMono',
-                    fontSize: 9,
-                    color: AppTheme.accentCyan,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        )),
-      ],
-    );
+class _SectionLabel extends StatelessWidget {
+  final String text;
+  final Color? color;
+
+  const _SectionLabel(this.text, {this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(text,
+        style: TextStyle(
+            fontFamily: 'SpaceMono',
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            color: color ?? AppTheme.textMuted,
+            letterSpacing: 1));
   }
 }

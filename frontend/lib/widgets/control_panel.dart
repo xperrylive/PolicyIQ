@@ -1,13 +1,13 @@
-/// control_panel.dart — 8-Knob manual override sliders.
-///
-/// Allows the user to manually set any of the 8 Universal Knobs before
-/// simulation. Null (unset) knobs are determined by the AI decomposition.
+// control_panel.dart — 8-Knob manual override sliders.
+//
+// Allows the user to manually set any of the 8 Universal Knobs before
+// simulation. Null (unset) knobs are determined by the AI decomposition.
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../models/contracts.dart';
-import '../services/api_client.dart';
+import '../state/simulation_state.dart';
 
 class ControlPanel extends StatefulWidget {
   const ControlPanel({super.key});

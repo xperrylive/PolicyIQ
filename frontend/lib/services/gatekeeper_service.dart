@@ -4,6 +4,7 @@
 // No Gemini/Google API keys or URLs live here.
 
 import '../models/contracts.dart';
+import '../state/simulation_state.dart';
 import 'api_client.dart';
 
 class GatekeeperService {
@@ -19,13 +20,17 @@ class GatekeeperService {
     String policyText,
     SimulationState state,
   ) async {
-    state.setValidating(true);
+    state.setValidating();
     try {
       final result = await _client.validatePolicy(policyText);
-      state.setValidationResult(result);
+      if (result.isValid) {
+        state.setValidationSuccess(result);
+      } else {
+        state.setValidationFailed(result.rejectionReason ?? 'Policy rejected');
+      }
       return result;
     } catch (e) {
-      state.setValidationResult(null, error: e.toString());
+      state.setValidationFailed(e.toString());
       rethrow;
     }
   }

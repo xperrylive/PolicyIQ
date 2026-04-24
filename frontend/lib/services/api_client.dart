@@ -3,22 +3,16 @@
 // Provides:
 //   - [validatePolicy]  POST /validate-policy  (Contract Pre-A → Pre-B)
 //   - [simulateStream]  POST /simulate          (Contract A → SSE tick/complete events)
-//
-// Also exposes [SimulationState] — a ChangeNotifier that the Provider tree
-// uses to drive UI rebuilds.
 
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../models/contracts.dart';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
-/// Base URL of the PolicyIQ FastAPI backend.
-/// Override this for different environments.
 const String _kApiBaseUrl =
     String.fromEnvironment('API_BASE_URL', defaultValue: 'http://127.0.0.1:8000');
 
@@ -34,14 +28,10 @@ class ApiClient {
 
   // ── Contract Pre-A → Pre-B ─────────────────────────────────────────────────
 
-  /// Sends a raw policy text to the Gatekeeper and returns the validation result.
-  ///
-  /// Throws [ApiException] on non-2xx responses.
   Future<ValidatePolicyResponse> validatePolicy(String rawPolicyText) async {
     final uri = Uri.parse('$baseUrl/validate-policy');
     final request = ValidatePolicyRequest(rawPolicyText: rawPolicyText);
 
-    print('DEBUG: Sending request to $uri');
     final response = await _httpClient.post(
       uri,
       headers: {'Content-Type': 'application/json'},
@@ -58,18 +48,9 @@ class ApiClient {
 
   // ── Contract A → SSE (tick / complete / error events) ─────────────────────
 
-  /// Initiates the simulation and returns a [Stream] of SSE events.
-  ///
-  /// Each emitted [SseEvent] has:
-  ///   - [SseEvent.type] — `'tick'`, `'complete'`, or `'error'`
-  ///   - [SseEvent.data] — JSON-decoded payload as Map<String, dynamic>
-  ///
-  /// The stream closes automatically after the `'complete'` or `'error'` event.
   Stream<SseEvent> simulateStream(SimulateRequest request) async* {
     final uri = Uri.parse('$baseUrl/simulate');
 
-    // POST the simulation request body; the server responds with
-    // Content-Type: text/event-stream.
     final httpRequest = http.Request('POST', uri)
       ..headers['Content-Type'] = 'application/json'
       ..headers['Accept'] = 'text/event-stream'
@@ -87,7 +68,6 @@ class ApiClient {
       throw ApiException(streamedResponse.statusCode, body);
     }
 
-    // Parse the raw SSE byte stream into typed events.
     String eventType = 'message';
     final StringBuffer dataBuffer = StringBuffer();
 
@@ -99,7 +79,6 @@ class ApiClient {
         } else if (line.startsWith('data:')) {
           dataBuffer.write(line.substring(5).trim());
         } else if (line.isEmpty && dataBuffer.isNotEmpty) {
-          // Blank line = end of SSE event
           final rawData = dataBuffer.toString();
           dataBuffer.clear();
 
@@ -113,17 +92,12 @@ class ApiClient {
           yield SseEvent(type: eventType, data: payload);
 
           if (eventType == 'complete' || eventType == 'error') return;
-          eventType = 'message'; // Reset for next event
+          eventType = 'message';
         }
       }
     }
   }
 
-  void dispose() => _httpClient.close();
-
-  // ── GET /export-report/{simulation_id} ────────────────────────────────────
-
-  /// Fetches the text-based pitch-ready report for a completed simulation.
   Future<String> exportReport(String simulationId) async {
     final uri = Uri.parse('$baseUrl/export-report/$simulationId');
     final response = await _httpClient.get(uri);
@@ -133,6 +107,8 @@ class ApiClient {
     }
     throw ApiException(response.statusCode, response.body);
   }
+
+  void dispose() => _httpClient.close();
 }
 
 // ─── SSE Event ────────────────────────────────────────────────────────────────
@@ -157,155 +133,4 @@ class ApiException implements Exception {
 
   @override
   String toString() => 'ApiException($statusCode): $message';
-}
-
-// ─── SavedScenario ────────────────────────────────────────────────────────────
-
-/// A snapshot of a completed simulation run, stored for side-by-side comparison.
-class SavedScenario {
-  final String id;
-  final String label;
-  final String policyText;
-  final List<double> stabilityHistory;
-  final SimulateResponse result;
-  final DateTime savedAt;
-
-  const SavedScenario({
-    required this.id,
-    required this.label,
-    required this.policyText,
-    required this.stabilityHistory,
-    required this.result,
-    required this.savedAt,
-  });
-}
-
-// ─── SimulationState (ChangeNotifier / Provider) ─────────────────────────────
-
-/// Shared state for the simulation UI.
-/// Consumed by DashboardScreen, GatekeeperUI, ControlPanel, and AnomalyHunter.
-class SimulationState extends ChangeNotifier {
-  // ── Input state ───────────────────────────────────────────────────────────
-  String policyText = '';
-  int simulationTicks = 4;
-  int agentCount = 50;
-  KnobOverrides knobOverrides = const KnobOverrides();
-
-  // ── Validation state ──────────────────────────────────────────────────────
-  ValidatePolicyResponse? validationResult;
-  bool isValidating = false;
-  String? validationError;
-
-  /// True once the backend Gatekeeper has approved the policy (is_feasible == true).
-  bool get isPolicyApproved => validationResult?.isValid == true;
-
-  /// The EnvironmentBlueprint from the last successful validation.
-  EnvironmentBlueprint? get environmentBlueprint =>
-      validationResult?.environmentBlueprint;
-
-  // ── Simulation state ──────────────────────────────────────────────────────
-  bool isSimulating = false;
-  List<TickSummary> ticks = [];
-  SimulateResponse? finalResult;
-  String? simulationError;
-
-  /// Reward stability history for the live stress-test chart.
-  /// Each entry is the rewardStabilityScore for that tick (index = tick order).
-  List<double> rewardStabilityHistory = [];
-
-  // ── Scenario Versioning ───────────────────────────────────────────────────
-
-  /// All saved scenarios for side-by-side comparison.
-  List<SavedScenario> savedScenarios = [];
-
-  /// Which scenario slot is currently overlaid on the chart (null = none).
-  String? comparisonScenarioId;
-
-  /// Returns the scenario currently selected for comparison, if any.
-  SavedScenario? get comparisonScenario => savedScenarios
-      .where((s) => s.id == comparisonScenarioId)
-      .firstOrNull;
-
-  /// Saves the current completed simulation as a named scenario.
-  /// Returns the saved scenario, or null if no final result exists.
-  SavedScenario? saveCurrentScenario(String label) {
-    if (finalResult == null) return null;
-    final scenario = SavedScenario(
-      id: 'scenario_${DateTime.now().millisecondsSinceEpoch}',
-      label: label,
-      policyText: policyText,
-      stabilityHistory: List.unmodifiable(rewardStabilityHistory),
-      result: finalResult!,
-      savedAt: DateTime.now(),
-    );
-    savedScenarios = [...savedScenarios, scenario];
-    notifyListeners();
-    return scenario;
-  }
-
-  /// Loads a saved scenario's policy text for refinement, keeping saved
-  /// scenarios intact so the user can compare after re-running.
-  void refineFromScenario(SavedScenario scenario) {
-    policyText = scenario.policyText;
-    // Clear current run so the user starts fresh
-    ticks = [];
-    finalResult = null;
-    simulationError = null;
-    rewardStabilityHistory = [];
-    notifyListeners();
-  }
-
-  /// Sets the scenario to overlay on the Stability Chart.
-  void setComparisonScenario(String? scenarioId) {
-    comparisonScenarioId = scenarioId;
-    notifyListeners();
-  }
-
-  // ── Helpers ───────────────────────────────────────────────────────────────
-
-  void setValidating(bool value) {
-    isValidating = value;
-    notifyListeners();
-  }
-
-  void setValidationResult(ValidatePolicyResponse? result, {String? error}) {
-    validationResult = result;
-    validationError = error;
-    isValidating = false;
-    notifyListeners();
-  }
-
-  void setSimulating(bool value) {
-    if (value) {
-      ticks = [];
-      finalResult = null;
-      simulationError = null;
-      rewardStabilityHistory = [];
-    }
-    isSimulating = value;
-    notifyListeners();
-  }
-
-  void addTick(TickSummary tick) {
-    ticks = [...ticks, tick];
-    rewardStabilityHistory = [...rewardStabilityHistory, tick.rewardStabilityScore];
-    notifyListeners();
-  }
-
-  void setFinalResult(SimulateResponse result) {
-    finalResult = result;
-    isSimulating = false;
-    notifyListeners();
-  }
-
-  void setSimulationError(String error) {
-    simulationError = error;
-    isSimulating = false;
-    notifyListeners();
-  }
-
-  void updateKnobOverrides(KnobOverrides overrides) {
-    knobOverrides = overrides;
-    notifyListeners();
-  }
 }

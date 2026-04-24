@@ -1,14 +1,15 @@
-/// gatekeeper_ui.dart — Policy input box with validation state display.
-///
-/// Handles:
-///   - Free-text policy input
-///   - Calling POST /validate-policy on submit
-///   - Showing rejection reason and refined option chips
+// gatekeeper_ui.dart — Policy input box with validation state display.
+//
+// Handles:
+//   - Free-text policy input
+//   - Calling POST /validate-policy on submit
+//   - Showing rejection reason and refined option chips
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../services/api_client.dart';
+import '../state/simulation_state.dart';
 
 class GatekeeperUI extends StatefulWidget {
   const GatekeeperUI({super.key});
@@ -27,13 +28,17 @@ class _GatekeeperUIState extends State<GatekeeperUI> {
     final state = context.read<SimulationState>();
     final client = context.read<ApiClient>();
     state.policyText = text;
-    state.setValidating(true);
+    state.setValidating();
 
     try {
       final result = await client.validatePolicy(text);
-      state.setValidationResult(result);
+      if (result.isValid) {
+        state.setValidationSuccess(result);
+      } else {
+        state.setValidationFailed(result.rejectionReason ?? 'Policy rejected');
+      }
     } catch (e) {
-      state.setValidationResult(null, error: e.toString());
+      state.setValidationFailed(e.toString());
     }
   }
 
@@ -58,15 +63,15 @@ class _GatekeeperUIState extends State<GatekeeperUI> {
             filled: true,
             fillColor: const Color(0xFF0D0D1A),
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
-                borderSide: BorderSide(color: Colors.white.withOpacity(0.1))),
+                borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1))),
           ),
         ),
         const SizedBox(height: 8),
         SizedBox(
           width: double.infinity,
           child: OutlinedButton(
-            onPressed: state.isValidating ? null : _validate,
-            child: Text(state.isValidating ? 'Validating…' : 'Validate Policy'),
+            onPressed: state.status == SimulationStatus.validating ? null : _validate,
+            child: Text(state.status == SimulationStatus.validating ? 'Validating…' : 'Validate Policy'),
           ),
         ),
 
@@ -76,8 +81,8 @@ class _GatekeeperUIState extends State<GatekeeperUI> {
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
               color: result.isValid
-                  ? const Color(0xFF48CFAD).withOpacity(0.1)
-                  : const Color(0xFFFF6B6B).withOpacity(0.1),
+                  ? const Color(0xFF48CFAD).withValues(alpha: 0.1)
+                  : const Color(0xFFFF6B6B).withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(8),
               border: Border.all(
                 color: result.isValid ? const Color(0xFF48CFAD) : const Color(0xFFFF6B6B),
@@ -116,7 +121,7 @@ class _GatekeeperUIState extends State<GatekeeperUI> {
                       margin: const EdgeInsets.only(bottom: 4),
                       padding: const EdgeInsets.all(8),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF6C63FF).withOpacity(0.15),
+                        color: const Color(0xFF6C63FF).withValues(alpha: 0.15),
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(opt,

@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../theme/app_theme.dart';
 import '../models/system_models.dart';
 import '../models/contracts.dart';
+import '../state/simulation_state.dart';
 import '../services/api_client.dart';
 import '../widgets/control/stability_meter.dart';
 
@@ -647,7 +648,7 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
   }
 
   Widget _buildSimulateButton(SimulationState simState) {
-    final canSimulate = simState.isPolicyApproved && !simState.isSimulating;
+    final canSimulate = simState.status == SimulationStatus.readyToReview;
     return SizedBox(
       width: double.infinity,
       child: GestureDetector(
@@ -668,7 +669,7 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
             ),
           ),
           child: Center(
-            child: simState.isSimulating
+            child: simState.status == SimulationStatus.simulating
                 ? Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -831,7 +832,7 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
       knobOverrides: _overrideActive ? overrides : const KnobOverrides(),
     );
 
-    simState.setSimulating(true);
+    simState.setSimulating();
 
     apiClient.simulateStream(request).listen(
       (event) {
@@ -843,24 +844,18 @@ class _ControlPanelScreenState extends State<ControlPanelScreen>
           }
         } else if (event.type == 'complete') {
           try {
-            simState.setFinalResult(SimulateResponse.fromJson(event.data));
+            simState.setSimulationComplete(SimulateResponse.fromJson(event.data));
           } catch (e) {
             debugPrint('Complete parse error: $e');
           }
-          simState.setSimulating(false);
         } else if (event.type == 'error') {
-          simState.setSimulationError(
+          simState.setSimulationFailed(
             event.data['detail'] as String? ?? 'Unknown error',
           );
-          simState.setSimulating(false);
         }
       },
       onError: (Object e) {
-        simState.setSimulationError(e.toString());
-        simState.setSimulating(false);
-      },
-      onDone: () {
-        if (simState.isSimulating) simState.setSimulating(false);
+        simState.setSimulationFailed(e.toString());
       },
     );
   }
