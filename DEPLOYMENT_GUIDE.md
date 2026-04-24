@@ -24,24 +24,31 @@ Groq's free tier has rate limits. PolicyIQ distributes the 50 agents across 3 ke
 This enables sub-second tick execution for all 50 agents simultaneously.
 
 ### 2. Install gcloud CLI
+
+#### Windows (PowerShell)
+1. Download the Google Cloud SDK installer from: https://cloud.google.com/sdk/docs/install
+2. Run the installer and follow the setup wizard
+3. Restart PowerShell after installation
+
+#### macOS
 ```bash
-# macOS
 brew install google-cloud-sdk
+```
 
-# Windows
-# Download from: https://cloud.google.com/sdk/docs/install
-
-# Linux
+#### Linux
+```bash
 curl https://sdk.cloud.google.com | bash
 ```
 
 Verify installation:
-```bash
+```powershell
+# Windows PowerShell
 gcloud --version
 ```
 
 ### 3. Authenticate with GCP
-```bash
+```powershell
+# Windows PowerShell
 gcloud auth login
 gcloud config set project policyiq2
 ```
@@ -51,6 +58,16 @@ gcloud config set project policyiq2
 ## ☁️ Cloud Run Deployment
 
 ### Step 1: Set Environment Variables
+
+#### Windows PowerShell
+```powershell
+# Export your 3 Groq API keys
+$env:GROQ_API_KEY_1="gsk_your_first_key_here"
+$env:GROQ_API_KEY_2="gsk_your_second_key_here"
+$env:GROQ_API_KEY_3="gsk_your_third_key_here"
+```
+
+#### macOS/Linux (Bash)
 ```bash
 # Export your 3 Groq API keys
 export GROQ_API_KEY_1="gsk_your_first_key_here"
@@ -61,6 +78,14 @@ export GROQ_API_KEY_3="gsk_your_third_key_here"
 **Important**: These keys are set as Cloud Run environment variables during deployment. They are NOT committed to your repository.
 
 ### Step 2: Run Deployment Script
+
+#### Windows PowerShell
+```powershell
+# Run the PowerShell deployment script
+.\deploy_cloud.ps1
+```
+
+#### macOS/Linux (Bash)
 ```bash
 # Make the script executable
 chmod +x deploy_cloud.sh
@@ -104,7 +129,7 @@ const String _kApiBaseUrl = 'http://127.0.0.1:8000';
 const String _kApiBaseUrl = 'https://policyiq-backend-abc123-as.a.run.app';
 ```
 
-### Step 2: Rebuild Flutter App
+### Frontend Configuration
 ```bash
 cd frontend
 flutter clean
@@ -116,7 +141,7 @@ flutter build windows  # For Windows executable
 flutter build macos  # For macOS app
 ```
 
-### Step 3: Test the Connection
+### Test Your Flutter App
 ```bash
 flutter run -d chrome
 ```
@@ -128,6 +153,14 @@ Try validating a policy in the Gatekeeper screen. If you see the AI response, yo
 ## 🧪 Testing Your Deployment
 
 ### Test 1: Health Check
+
+#### Windows PowerShell
+```powershell
+# Test the health endpoint
+Invoke-RestMethod -Uri "https://policyiq-backend-abc123-as.a.run.app/health"
+```
+
+#### macOS/Linux (Bash)
 ```bash
 curl https://policyiq-backend-abc123-as.a.run.app/health
 ```
@@ -138,6 +171,21 @@ Expected response:
 ```
 
 ### Test 2: Policy Validation
+
+#### Windows PowerShell
+```powershell
+# Test policy validation endpoint
+$body = @{
+    raw_policy_text = "Increase RON95 petrol price by 63% to RM3.35/litre"
+} | ConvertTo-Json
+
+Invoke-RestMethod -Uri "https://policyiq-backend-abc123-as.a.run.app/validate-policy" `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body $body
+```
+
+#### macOS/Linux (Bash)
 ```bash
 curl -X POST https://policyiq-backend-abc123-as.a.run.app/validate-policy \
   -H "Content-Type: application/json" \
@@ -169,6 +217,14 @@ Expected response:
 
 ### Issue: "Permission denied" during deployment
 **Solution**: Ensure you're authenticated and have the correct project set:
+
+#### Windows PowerShell
+```powershell
+gcloud auth login
+gcloud config set project policyiq2
+```
+
+#### macOS/Linux (Bash)
 ```bash
 gcloud auth login
 gcloud config set project policyiq2
@@ -176,6 +232,14 @@ gcloud config set project policyiq2
 
 ### Issue: "Service account does not have permission"
 **Solution**: Enable required APIs:
+
+#### Windows PowerShell
+```powershell
+gcloud services enable run.googleapis.com
+gcloud services enable cloudbuild.googleapis.com
+```
+
+#### macOS/Linux (Bash)
 ```bash
 gcloud services enable run.googleapis.com
 gcloud services enable cloudbuild.googleapis.com
@@ -198,6 +262,13 @@ gcloud services enable cloudbuild.googleapis.com
 ## 📊 Monitoring Your Deployment
 
 ### View Logs
+
+#### Windows PowerShell
+```powershell
+gcloud run logs read policyiq-backend --region=asia-southeast1 --limit=50
+```
+
+#### macOS/Linux (Bash)
 ```bash
 gcloud run logs read policyiq-backend --region=asia-southeast1 --limit=50
 ```
@@ -212,6 +283,19 @@ gcloud run logs read policyiq-backend --region=asia-southeast1 --limit=50
    - Error rate
 
 ### Set Up Alerts (Optional)
+
+#### Windows PowerShell
+```powershell
+# Alert if error rate > 5%
+gcloud alpha monitoring policies create `
+  --notification-channels=YOUR_CHANNEL_ID `
+  --display-name="PolicyIQ Error Rate Alert" `
+  --condition-display-name="Error rate > 5%" `
+  --condition-threshold-value=0.05 `
+  --condition-threshold-duration=60s
+```
+
+#### macOS/Linux (Bash)
 ```bash
 # Alert if error rate > 5%
 gcloud alpha monitoring policies create \
@@ -264,6 +348,13 @@ app.add_middleware(
 ```
 
 2. **Add Authentication**:
+
+#### Windows PowerShell
+```powershell
+gcloud run deploy policyiq-backend --no-allow-unauthenticated  # Require authentication
+```
+
+#### macOS/Linux (Bash)
 ```bash
 gcloud run deploy policyiq-backend \
   --no-allow-unauthenticated  # Require authentication

@@ -10,41 +10,63 @@ Endpoints:
 
 from __future__ import annotations
 
-import sys, os; sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import json
 import logging
+import os
+import sys
 import uuid
 from pathlib import Path
 from typing import AsyncGenerator
 
+# Add current directory to Python path for container compatibility
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dotenv import load_dotenv
 
-# Load .env from the project root (one level up from backend/).
-# Uses override=True for local development so .env changes take effect immediately.
-# Docker env_file values are set after this, so they still take precedence.
-_env_path = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(_env_path, override=True)
-
+# Load .env from the project root (one level up from backend/ in dev, same level in container)
+if os.path.exists(".env"):
+    # Container environment - .env is in the same directory
+    load_dotenv(".env", override=True)
+else:
+    # Development environment - .env is one level up
+    _env_path = Path(__file__).resolve().parent.parent / ".env"
+    load_dotenv(_env_path, override=True)
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
-from backend.schemas import (
-    ValidatePolicyRequest,
-    ValidatePolicyResponse,
-    SimulateRequest,
-    SimulateResponse,
-    EnvironmentBlueprint,
-)
-from backend.ai_engine.orchestrator import (
-    Orchestrator,
-    validation_flow,
-    simulation_flow,
-    ai
-)
+# Use relative imports that work both in dev and container
+try:
+    # Try container-style imports first
+    from schemas import (
+        ValidatePolicyRequest,
+        ValidatePolicyResponse,
+        SimulateRequest,
+        SimulateResponse,
+        EnvironmentBlueprint,
+    )
+    from ai_engine.orchestrator import (
+        Orchestrator,
+        validation_flow,
+        simulation_flow,
+        ai
+    )
+except ImportError:
+    # Fall back to development-style imports
+    from backend.schemas import (
+        ValidatePolicyRequest,
+        ValidatePolicyResponse,
+        SimulateRequest,
+        SimulateResponse,
+        EnvironmentBlueprint,
+    )
+    from backend.ai_engine.orchestrator import (
+        Orchestrator,
+        validation_flow,
+        simulation_flow,
+        ai
+    )
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(levelname)s │ %(name)s │ %(message)s")
@@ -95,7 +117,10 @@ async def health() -> dict:
 @app.get("/test-suggestions", tags=["ops"], summary="Test suggestions feature")
 async def test_suggestions() -> dict:
     """Test endpoint to verify suggestions are being returned."""
-    from backend.schemas import ValidatePolicyRequest
+    try:
+        from schemas import ValidatePolicyRequest
+    except ImportError:
+        from backend.schemas import ValidatePolicyRequest
     
     test_request = ValidatePolicyRequest(
         raw_policy_text="increase taxes on car imports"

@@ -31,14 +31,24 @@ from typing import AsyncGenerator, Optional
 
 from groq import Groq
 
-from backend.ai_engine.physics import GlobalStateEngine
-from backend.ai_engine.key_manager import KeyManager
+# Use relative imports that work both in dev and container
+try:
+    # Try container-style imports first
+    from ai_engine.physics import GlobalStateEngine
+    from ai_engine.key_manager import KeyManager
+except ImportError:
+    # Fall back to development-style imports
+    from backend.ai_engine.physics import GlobalStateEngine
+    from backend.ai_engine.key_manager import KeyManager
 
 # ─── RAGClient import — retained for Vertex AI Search scaling readiness ───────
 # Not used for active inference (local search is primary), but kept to
 # demonstrate the hybrid architecture's cloud-scaling pathway.
 try:
-    from backend.ai_engine.rag_client import RAGClient  # noqa: F401
+    try:
+        from ai_engine.rag_client import RAGClient  # noqa: F401
+    except ImportError:
+        from backend.ai_engine.rag_client import RAGClient  # noqa: F401
 except ImportError:
     RAGClient = None  # type: ignore[assignment,misc]
 
@@ -181,7 +191,10 @@ async def validation_flow(policy_text: str) -> dict:
     EnvironmentBlueprint (8 Universal Knobs + 3–5 Dynamic Sublayers).
     Inference is executed via the Groq (Llama-3.3-70b) optimised engine.
     """
-    from backend.schemas import ValidatePolicyRequest  # noqa: PLC0415
+    try:
+        from schemas import ValidatePolicyRequest  # noqa: PLC0415
+    except ImportError:
+        from backend.schemas import ValidatePolicyRequest  # noqa: PLC0415
     orch    = Orchestrator()
     request = ValidatePolicyRequest(raw_policy_text=policy_text)
     result  = await orch.validate_policy(request)
@@ -447,7 +460,10 @@ class Orchestrator:
         Falls back to a safe "Invalid" response if the call fails or the
         model returns malformed JSON — the endpoint never crashes.
         """
-        from backend.schemas import ValidatePolicyResponse, EnvironmentBlueprint  # noqa: PLC0415
+        try:
+            from schemas import ValidatePolicyResponse, EnvironmentBlueprint  # noqa: PLC0415
+        except ImportError:
+            from backend.schemas import ValidatePolicyResponse, EnvironmentBlueprint  # noqa: PLC0415
 
         text              = request.raw_policy_text.strip()
         gatekeeper_prompt = self._load_prompt("gatekeeper.txt")
@@ -747,7 +763,10 @@ class Orchestrator:
           - Sub-layer count enforcement: padded to 3 minimum, capped at 5.
           - Smart Fallback (neutral knobs) if all retries are exhausted.
         """
-        from backend.schemas import PolicyDecomposition  # noqa: PLC0415
+        try:
+            from schemas import PolicyDecomposition  # noqa: PLC0415
+        except ImportError:
+            from backend.schemas import PolicyDecomposition  # noqa: PLC0415
 
         decomposition_prompt = self._load_prompt("decomposition.txt")
         logger.info(
@@ -1470,10 +1489,16 @@ class Orchestrator:
         Assemble and return the full Contract E SimulateResponse after all
         ticks have completed.
         """
-        from backend.schemas import (  # noqa: PLC0415
-            SimulateResponse, SimulationMetadata, MacroSummary,
-            TickSummary, TickAgentAction, Anomaly,
-        )
+        try:
+            from schemas import (  # noqa: PLC0415
+                SimulateResponse, SimulationMetadata, MacroSummary,
+                TickSummary, TickAgentAction, Anomaly,
+            )
+        except ImportError:
+            from backend.schemas import (  # noqa: PLC0415
+                SimulateResponse, SimulationMetadata, MacroSummary,
+                TickSummary, TickAgentAction, Anomaly,
+            )
 
         all_sentiments = [
             d["sentiment_score"]

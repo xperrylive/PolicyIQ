@@ -15,13 +15,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application source
 COPY . .
 
-# Expose the API port
-EXPOSE 8000
+# Set Python path to include the app directory
+ENV PYTHONPATH=/app
 
-# Health check for Cloud Run
+# Expose the API port (Cloud Run expects 8080, but we'll use PORT env var)
+EXPOSE 8080
+
+# Health check for Cloud Run (use PORT env var or default to 8080)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD curl -f http://localhost:8000/health || exit 1
+  CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
 
 # Run uvicorn on container start
-# Use 4 workers for better concurrency on Cloud Run (2 vCPU instance)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# Use PORT environment variable (Cloud Run requirement) or default to 8080
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1"]
