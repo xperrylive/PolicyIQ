@@ -41,6 +41,7 @@ class ApiClient {
     final uri = Uri.parse('$baseUrl/validate-policy');
     final request = ValidatePolicyRequest(rawPolicyText: rawPolicyText);
 
+    print('DEBUG: Sending request to $uri');
     final response = await _httpClient.post(
       uri,
       headers: {'Content-Type': 'application/json'},

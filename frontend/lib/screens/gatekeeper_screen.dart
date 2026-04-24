@@ -127,6 +127,7 @@ class _GatekeeperScreenState extends State<GatekeeperScreen>
       _slideCtrl.forward();
     } catch (e) {
       if (!mounted) return;
+      debugPrint('ERROR in _analyzeInput: $e');
       setState(() {
         _isValidating = false;
         _state = InputValidationState.idle;

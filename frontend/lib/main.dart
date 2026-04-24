@@ -1,14 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform;
+import 'package:provider/provider.dart';
 import 'package:window_size/window_size.dart';
 import 'theme/app_theme.dart';
-import 'models/system_models.dart';
-import 'data/agent_population.dart';
-import 'services/gatekeeper_service.dart';
-import 'services/decomposition_service.dart';
-import 'services/simulation_engine.dart';
-import 'services/rag_service.dart';
-import 'services/anomaly_engine.dart';
+import 'services/api_client.dart';
 import 'screens/gatekeeper_screen.dart';
 import 'screens/control_panel_screen.dart';
 import 'screens/macro_analytics_screen.dart';
@@ -41,11 +36,17 @@ class PolicyIQApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'PolicyIQ - Advanced Policy Analysis Dashboard',
-      debugShowCheckedModeBanner: false,
-      theme: AppTheme.darkTheme,
-      home: const AppShell(),
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => SimulationState()),
+        Provider(create: (_) => ApiClient()),
+      ],
+      child: MaterialApp(
+        title: 'PolicyIQ - Advanced Policy Analysis Dashboard',
+        debugShowCheckedModeBanner: false,
+        theme: AppTheme.darkTheme,
+        home: const AppShell(),
+      ),
     );
   }
 }
